@@ -1,27 +1,22 @@
 #include "aqm/log.h"
+#include "aqm/proc.h"
 #include "aqm/shm.h"
 #include "aqm/sig.h"
 #include "aqm/timeutil.h"
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
-    aqm_shm_t *shm = NULL;
+    int prio = aqm_parse_prio(argc, argv, 70);
+    aqm_shm_t *shm;
 
     aqm_signals_init();
-
-    /* wait for sense to create the shared memory */
-    while (!aqm_should_stop() && !(shm = aqm_shm_attach())) {
-        aqm_log("capture", "waiting for shm (%s)", strerror(errno));
-        sleep(1);
-    }
+    shm = aqm_attach_wait("capture");
     if (!shm)
         return 0;
-
-    aqm_log("capture", "attached");
+    aqm_rt_setup("capture", prio);
 
     while (!aqm_should_stop() && aqm_running(shm)) {
         aqm_sample_t s;
@@ -37,6 +32,11 @@ int main(void)
         aqm_log("capture", "seq %u pm2.5 %u tvoc %u status 0x%x | ipc latency %lld us",
                 s.seq, s.pm25, s.tvoc_ppb, s.status,
                 (long long)((mono_ns() - s.t_mono_ns) / 1000));
+
+        /* TODO Phase 3: persist to SQLite for the 48 h offline buffer */
+
+        if (aqm_ring_push(&shm->ring[AQM_RING_CAPTURE_CONVERT], &s) == -EAGAIN)
+            aqm_log("capture", "ring full, dropped seq %u", s.seq);
     }
 
     aqm_log("capture", "stopping");
