@@ -1,4 +1,4 @@
-foreach(t smoke ring shm)
+foreach(t smoke ring shm aqi)
   add_executable(test_${t} test_${t}.c)
   target_link_libraries(test_${t} PRIVATE aqm_common)
   add_test(NAME ${t} COMMAND test_${t})
