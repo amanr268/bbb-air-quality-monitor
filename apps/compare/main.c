@@ -13,6 +13,9 @@
 #define TVOC_HIGH_PPB   500     /* raise above this        */
 #define TVOC_CLEAR_PPB  400     /* clear below this (hysteresis) */
 
+/* AQI category debounce: worse = alarm at once, better = must hold N samples */
+#define AQI_RELEASE_SAMPLES 10
+
 #define ALM_BIT_AQI_POOR  (1u << 0)
 #define ALM_BIT_FAULT     (1u << 1)
 #define ALM_BIT_TVOC      (1u << 2)
@@ -55,7 +58,7 @@ static unsigned prio_for(aqm_aqi_cat_t c)
 int main(int argc, char **argv)
 {
     int prio = aqm_parse_prio(argc, argv, 50);
-    int last_cat = -1, tvoc_high = 0;
+    int last_cat = -1, tvoc_high = 0, better_count = 0;
     uint32_t last_status = 0;
     aqm_shm_t *shm;
     mqd_t q;
@@ -95,16 +98,32 @@ int main(int argc, char **argv)
         s.aqi_cat = (uint8_t)cat;
         s.alarms  = 0;
 
-        /* edge-triggered: alarm on category CHANGE, not every second */
-        if (!(s.status & AQM_ST_PMS_FAULT) && (int)cat != last_cat) {
-            if (last_cat < 0)
+        /* edge-triggered with asymmetric debounce ("fast attack, slow release"):
+         * worse category -> alarm immediately; better category -> only after
+         * it has held for AQI_RELEASE_SAMPLES, so values hovering on a
+         * breakpoint do not chatter */
+        if (!(s.status & AQM_ST_PMS_FAULT)) {
+            int change = 0;
+
+            if (last_cat < 0) {
                 raise_alarm(q, &s, AQM_ALM_AQI, AQM_PRIO_INFO,
                             "AQI %u %s (initial)", s.aqi, aqm_aqi_cat_name(cat));
-            else
+                last_cat = (int)cat;
+            } else if ((int)cat > last_cat) {
+                change = 1;                                /* worse: now */
+            } else if ((int)cat < last_cat) {
+                change = (++better_count >= AQI_RELEASE_SAMPLES);
+            } else {
+                better_count = 0;                          /* back to same */
+            }
+
+            if (change) {
                 raise_alarm(q, &s, AQM_ALM_AQI, prio_for(cat), "AQI %u: %s -> %s",
                             s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)last_cat),
                             aqm_aqi_cat_name(cat));
-            last_cat = (int)cat;
+                last_cat = (int)cat;
+                better_count = 0;
+            }
         }
         if (cat >= AQI_POOR)
             s.alarms |= ALM_BIT_AQI_POOR;
