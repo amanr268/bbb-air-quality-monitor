@@ -1,0 +1,23 @@
+Priority-inversion demo: LOW=10 MEDIUM=20 HIGH=30 (SCHED_FIFO, CPU 0)
+Note: the board may feel frozen for ~1 s during each run.
+
+=== WITHOUT priority inheritance (PTHREAD_PRIO_NONE) ===
+    0.0 ms  LOW     locked mutex, starting 200 ms of work
+   20.0 ms  HIGH    wants the mutex
+   40.0 ms  MEDIUM  starts 500 ms of CPU work (never uses the mutex)
+  544.4 ms  MEDIUM  done
+  707.9 ms  LOW     work done, unlocking
+  708.1 ms  HIGH    got the mutex after waiting 687.9 ms
+
+=== WITH priority inheritance (PTHREAD_PRIO_INHERIT) ===
+    0.0 ms  LOW     locked mutex, starting 200 ms of work
+   20.0 ms  HIGH    wants the mutex
+  202.9 ms  LOW     work done, unlocking
+  203.0 ms  HIGH    got the mutex after waiting 182.9 ms
+  203.3 ms  MEDIUM  starts 500 ms of CPU work (never uses the mutex)
+  705.8 ms  MEDIUM  done
+
+=== RESULT: how long HIGH (prio 30) was blocked ===
+  without PI :  687.9 ms  (LOW's 200 ms work + MEDIUM's 500 ms that cut in)
+  with PI    :  182.9 ms  (only LOW's remaining work)
+  improvement: 3.8x faster
