@@ -30,27 +30,29 @@ static int noise(int span)
 
 static void sim_read(aqm_sample_t *s)
 {
-    static int pm25 = 60, tvoc = 150;
+    static double pm25 = 60.0, tvoc = 150.0;
     static double temp_c = 28.0, rh = 55.0;
 
-    pm25 += noise(3) + (60 - pm25) / 20;          /* drift back to ~60   */
+    /* floating-point mean reversion: integer (60 - pm25) / 20 is 0 for
+     * |error| < 20, which let the value wander instead of returning to 60 */
+    pm25 += noise(3) + (60.0 - pm25) * 0.05;      /* drift back to ~60   */
     if (rng() % 120 == 0)
-        pm25 += 150;                              /* pollution spike     */
-    if (pm25 < 5)
-        pm25 = 5;
+        pm25 += 150.0;                            /* pollution spike     */
+    if (pm25 < 5.0)
+        pm25 = 5.0;
 
-    tvoc += noise(10) + (150 - tvoc) / 20;
-    if (tvoc < 0)
-        tvoc = 0;
+    tvoc += noise(10) + (150.0 - tvoc) * 0.05;
+    if (tvoc < 0.0)
+        tvoc = 0.0;
 
     temp_c += noise(1) * 0.05;
     rh     += noise(1) * 0.2;
 
-    s->pm25     = (uint16_t)pm25;
-    s->pm1      = (uint16_t)(pm25 * 7 / 10);
-    s->pm10     = (uint16_t)(pm25 * 16 / 10);
-    s->tvoc_ppb = (uint16_t)tvoc;
-    s->eco2_ppm = (uint16_t)(400 + tvoc);
+    s->pm25     = (uint16_t)(pm25 + 0.5);
+    s->pm1      = (uint16_t)(pm25 * 0.7 + 0.5);
+    s->pm10     = (uint16_t)(pm25 * 1.6 + 0.5);
+    s->tvoc_ppb = (uint16_t)(tvoc + 0.5);
+    s->eco2_ppm = (uint16_t)(400.0 + tvoc + 0.5);
 
     /* AHT21 raw format: 20-bit values */
     s->aht_t_raw  = (uint32_t)((temp_c + 50.0) / 200.0 * (1 << 20));
