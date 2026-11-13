@@ -11,6 +11,11 @@ add_library(aqm_common STATIC
   src/alarm.c
   src/calib.c
   src/store.c
+  src/ssd1306.c
+  src/font_data.c
+  src/adxl345.c
+  src/orient.c
+  src/screen.c
 )
 target_include_directories(aqm_common PUBLIC include)
-target_link_libraries(aqm_common PUBLIC Threads::Threads rt SQLite::SQLite3)
+target_link_libraries(aqm_common PUBLIC Threads::Threads rt m SQLite::SQLite3)
