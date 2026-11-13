@@ -9,3 +9,6 @@ target_link_libraries(autorotate PRIVATE aqm_common)
 
 add_executable(accel_view accel_view.c)
 target_link_libraries(accel_view PRIVATE aqm_common)
+
+add_executable(accel_cal accel_cal.c)
+target_link_libraries(accel_cal PRIVATE aqm_common)

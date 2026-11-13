@@ -8,12 +8,11 @@
  *   X +0.02 |-----|##      bar: -1 g ... 0 ... +1 g
  *   Y -0.01 |---#|
  *   Z +1.00 |    |#####
- *   |g| 1.00  FLAT
+ *   |g| 1.00  tilt  3     (0 = flat, 90 = upright)
  *
  * -p DIR: no hardware; renders frames with simulated motion to PBM files.
  */
 #include "aqm/adxl345.h"
-#include "aqm/orient.h"
 #include "aqm/sig.h"
 #include "aqm/ssd1306.h"
 #include "aqm/timeutil.h"
@@ -31,8 +30,6 @@
 #define BAR_H     8
 #define BAR_ZERO  (BAR_X0 + BAR_W / 2)
 #define BAR_PX_G  ((BAR_W / 2) - 1)     /* pixels per 1 g           */
-
-static const char *ORIENT_SHORT[] = { "LAND", "PORT", "LAND-F", "PORT-F" };
 
 static void bar(ssd1306_t *d, int y, float g)
 {
@@ -53,7 +50,8 @@ static void draw(ssd1306_t *d, unsigned addr, float gx, float gy, float gz)
 {
     const aqm_font_t *f = &font_6_10;
     float mag = sqrtf(gx * gx + gy * gy + gz * gz);
-    int o = aqm_orient_classify(gx, gy, gz);
+    /* tilt from flat: 0 deg = lying flat, 90 deg = upright */
+    float tilt = mag > 0.1f ? acosf(fminf(1.0f, fabsf(gz) / mag)) * 57.2958f : 0.0f;
     char buf[32];
 
     ssd1306_clear(d);
@@ -70,7 +68,7 @@ static void draw(ssd1306_t *d, unsigned addr, float gx, float gy, float gz)
     ssd1306_text(d, 0, 39, buf, f);
     bar(d, 40, gz);
 
-    snprintf(buf, sizeof(buf), "|g| %4.2f  %s", mag, o < 0 ? "FLAT/45" : ORIENT_SHORT[o]);
+    snprintf(buf, sizeof(buf), "|g| %4.2f  tilt %2.0f", mag, tilt);
     ssd1306_text(d, 0, 54, buf, f);
 }
 
