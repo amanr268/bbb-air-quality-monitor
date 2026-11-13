@@ -77,18 +77,37 @@ void ssd1306_close(ssd1306_t *d)
     d->fd = -1;
 }
 
+/*
+ * Send the framebuffer page by page (8 rows x 128 columns = 128 bytes each),
+ * and only the pages that changed since the last flush.
+ *  - each I2C transfer is ~12 ms at 100 kHz instead of ~95 ms for a whole
+ *    frame, so other users of the bus (the real-time sensor reads) wait at
+ *    most one page;
+ *  - unchanged pages cost nothing.
+ */
 int ssd1306_flush(ssd1306_t *d)
 {
-    /* window = whole screen, then stream 1024 bytes in one I2C write */
-    static const uint8_t window[] = { 0x21, 0, SSD1306_W - 1, 0x22, 0, (SSD1306_H / 8) - 1 };
-    uint8_t buf[SSD1306_FB + 1];
-    int rc = ssd1306_cmd(d, window, (int)sizeof(window));
+    uint8_t buf[SSD1306_W + 1];
+    int page;
 
-    if (rc)
-        return rc;
-    buf[0] = CTRL_DATA;
-    memcpy(&buf[1], d->fb, SSD1306_FB);
-    return write(d->fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf) ? 0 : -errno;
+    for (page = 0; page < SSD1306_H / 8; page++) {
+        const uint8_t *src = &d->fb[page * SSD1306_W];
+        uint8_t *shadow = &d->shadow[page * SSD1306_W];
+        uint8_t window[] = { 0x21, 0, SSD1306_W - 1, 0x22, (uint8_t)page, (uint8_t)page };
+        int rc;
+
+        if (d->shadow_valid && !memcmp(src, shadow, SSD1306_W))
+            continue;                                   /* page unchanged */
+        if ((rc = ssd1306_cmd(d, window, (int)sizeof(window))) != 0)
+            return rc;
+        buf[0] = CTRL_DATA;
+        memcpy(&buf[1], src, SSD1306_W);
+        if (write(d->fd, buf, sizeof(buf)) != (ssize_t)sizeof(buf))
+            return -errno;
+        memcpy(shadow, src, SSD1306_W);
+    }
+    d->shadow_valid = 1;
+    return 0;
 }
 
 int ssd1306_contrast(ssd1306_t *d, uint8_t level)
@@ -187,6 +206,12 @@ static unsigned glyph_row(const aqm_font_t *f, int c, int row)
 
 int ssd1306_text(ssd1306_t *d, int x, int y, const char *s, const aqm_font_t *f)
 {
+    return ssd1306_text_color(d, x, y, s, f, 1);
+}
+
+int ssd1306_text_color(ssd1306_t *d, int x, int y, const char *s,
+                       const aqm_font_t *f, int on)
+{
     for (; *s; s++) {
         int c = (unsigned char)*s, row, col;
 
@@ -197,7 +222,7 @@ int ssd1306_text(ssd1306_t *d, int x, int y, const char *s, const aqm_font_t *f)
 
             for (col = 0; col < f->w; col++)
                 if (bits & (1u << (f->w - 1 - col)))
-                    ssd1306_pixel(d, x + col, y + row, 1);
+                    ssd1306_pixel(d, x + col, y + row, on);
         }
         x += f->w;
     }

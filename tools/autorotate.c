@@ -116,7 +116,7 @@ int main(int argc, char **argv)
         }
 
         demo_sample(&s, n * PERIOD_MS / 1000.0);
-        aqm_screen_draw(&lcd, &s);
+        aqm_screen_draw(&lcd, &s, NULL);
         if ((rc = ssd1306_flush(&lcd)) != 0)
             fprintf(stderr, "OLED write: %s\n", strerror(-rc));
 
