@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * BB-AQM-00A0: BeagleBone Black Wireless air-quality monitor cape.
+ * One overlay for everything the monitor uses (replaces BB-UART1 + BB-UART4):
+ *
+ *   UART1  P9.24 TX / P9.26 RX   PMS5003            /dev/ttyS1
+ *   UART2  P9.21 TX / P9.22 RX   NEO-6M GPS         /dev/ttyS2
+ *   UART4  P9.13 TX / P9.11 RX   RS485 (Modbus)     /dev/ttyS4
+ *   I2C2   P9.19 SCL / P9.20 SDA 400 kHz: OLED 0x3C, ADXL345 0x1D,
+ *                                ENS160 0x53, AHT21 0x38
+ *   P8.12  GPIO1_12  button to GND, active low   -> gpio-keys (KEY_PROG1)
+ *   P8.14  GPIO0_26  LED via 1k to GND           -> gpio-leds "aqm:alarm"
+ *
+ * Pad config (3rd/2nd cell): 0x08 output, no pull | 0x28 input, no pull |
+ *                            0x30 input, pull-up   ; last cell = mux mode
+ * Pin offsets are from the AM335x control module pad registers (base 0x800).
+ *
+ * Build: dtc -@ -I dts -O dtb -o BB-AQM-00A0.dtbo BB-AQM-00A0.dts
+ */
+/dts-v1/;
+/plugin/;
+
+/* shows up in /proc/device-tree/chosen/overlays/ when loaded */
+&{/chosen} {
+	overlays {
+		BB-AQM-00A0.kernel = "2026-11-14";
+	};
+};
+
+/* release the pins from the cape-universal pinmux helpers, like the stock overlays do */
+&ocp {
+	P9_24_pinmux { status = "disabled"; };
+	P9_26_pinmux { status = "disabled"; };
+	P9_21_pinmux { status = "disabled"; };
+	P9_22_pinmux { status = "disabled"; };
+	P9_13_pinmux { status = "disabled"; };
+	P9_11_pinmux { status = "disabled"; };
+	P9_19_pinmux { status = "disabled"; };
+	P9_20_pinmux { status = "disabled"; };
+	P8_12_pinmux { status = "disabled"; };
+	P8_14_pinmux { status = "disabled"; };
+};
+
+&am33xx_pinmux {
+	aqm_uart1_pins: aqm-uart1-pins {
+		pinctrl-single,pins = <
+			0x184 0x08 0x00		/* P9.24 uart1_txd, mode 0 */
+			0x180 0x28 0x00		/* P9.26 uart1_rxd, mode 0 */
+		>;
+	};
+	aqm_uart2_pins: aqm-uart2-pins {
+		pinctrl-single,pins = <
+			0x154 0x08 0x01		/* P9.21 uart2_txd, mode 1 */
+			0x150 0x30 0x01		/* P9.22 uart2_rxd, mode 1, pull-up (idle high if GPS unplugged) */
+		>;
+	};
+	aqm_uart4_pins: aqm-uart4-pins {
+		pinctrl-single,pins = <
+			0x074 0x08 0x06		/* P9.13 uart4_txd, mode 6 */
+			0x070 0x30 0x06		/* P9.11 uart4_rxd, mode 6, pull-up */
+		>;
+	};
+	aqm_i2c2_pins: aqm-i2c2-pins {
+		pinctrl-single,pins = <
+			0x178 0x30 0x03		/* P9.20 i2c2_sda, mode 3 */
+			0x17c 0x30 0x03		/* P9.19 i2c2_scl, mode 3 */
+		>;
+	};
+	aqm_button_pins: aqm-button-pins {
+		pinctrl-single,pins = <
+			0x030 0x30 0x07		/* P8.12 gpio1_12, input, pull-up */
+		>;
+	};
+	aqm_led_pins: aqm-led-pins {
+		pinctrl-single,pins = <
+			0x028 0x08 0x07		/* P8.14 gpio0_26, output */
+		>;
+	};
+};
+
+&uart1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&aqm_uart1_pins>;
+};
+
+&uart2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&aqm_uart2_pins>;
+};
+
+&uart4 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&aqm_uart4_pins>;
+};
+
+&i2c2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&aqm_i2c2_pins>;
+	clock-frequency = <400000>;
+};
+
+&{/} {
+	aqm-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&aqm_button_pins>;
+
+		button {
+			label = "aqm-button";
+			gpios = <&gpio1 12 1>;		/* 1 = GPIO_ACTIVE_LOW */
+			linux,code = <148>;		/* KEY_PROG1 */
+			debounce-interval = <20>;	/* ms */
+		};
+	};
+
+	aqm-leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&aqm_led_pins>;
+
+		led-alarm {
+			label = "aqm:alarm";
+			gpios = <&gpio0 26 0>;		/* 0 = GPIO_ACTIVE_HIGH */
+			default-state = "off";
+			linux,default-trigger = "none";
+		};
+	};
+};

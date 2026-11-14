@@ -58,3 +58,4 @@ logs/
 data/
 /*.gif
 /*.bin
+dts/*.dtbo
