@@ -4,7 +4,6 @@
  * One overlay for everything the monitor uses (replaces BB-UART1 + BB-UART4):
  *
  *   UART1  P9.24 TX / P9.26 RX   PMS5003            /dev/ttyS1
- *   UART2  P9.21 TX / P9.22 RX   NEO-6M GPS         /dev/ttyS2
  *   UART4  P9.13 TX / P9.11 RX   RS485 (Modbus)     /dev/ttyS4
  *   I2C2   P9.19 SCL / P9.20 SDA 400 kHz: OLED 0x3C, ADXL345 0x1D,
  *                                ENS160 0x53, AHT21 0x38
@@ -23,7 +22,7 @@
 /* shows up in /proc/device-tree/chosen/overlays/ when loaded */
 &{/chosen} {
 	overlays {
-		BB-AQM-00A0.kernel = "2026-11-14";
+		BB-AQM-00A0.kernel = "2026-11-15";
 	};
 };
 
@@ -31,8 +30,6 @@
 &ocp {
 	P9_24_pinmux { status = "disabled"; };
 	P9_26_pinmux { status = "disabled"; };
-	P9_21_pinmux { status = "disabled"; };
-	P9_22_pinmux { status = "disabled"; };
 	P9_13_pinmux { status = "disabled"; };
 	P9_11_pinmux { status = "disabled"; };
 	P9_19_pinmux { status = "disabled"; };
@@ -46,12 +43,6 @@
 		pinctrl-single,pins = <
 			0x184 0x08 0x00		/* P9.24 uart1_txd, mode 0 */
 			0x180 0x28 0x00		/* P9.26 uart1_rxd, mode 0 */
-		>;
-	};
-	aqm_uart2_pins: aqm-uart2-pins {
-		pinctrl-single,pins = <
-			0x154 0x08 0x01		/* P9.21 uart2_txd, mode 1 */
-			0x150 0x30 0x01		/* P9.22 uart2_rxd, mode 1, pull-up (idle high if GPS unplugged) */
 		>;
 	};
 	aqm_uart4_pins: aqm-uart4-pins {
@@ -82,12 +73,6 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&aqm_uart1_pins>;
-};
-
-&uart2 {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&aqm_uart2_pins>;
 };
 
 &uart4 {
