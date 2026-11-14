@@ -21,6 +21,20 @@ add_library(aqm_common STATIC
   src/button.c
   src/led.c
   src/avg.c
+  src/json.c
+  src/mqtt.c
 )
 target_include_directories(aqm_common PUBLIC include)
 target_link_libraries(aqm_common PUBLIC Threads::Threads rt m SQLite::SQLite3)
+
+# MQTT is optional: without libmosquitto-dev the publisher compiles to no-ops
+find_path(MOSQUITTO_INCLUDE_DIR mosquitto.h)
+find_library(MOSQUITTO_LIBRARY mosquitto)
+if(MOSQUITTO_INCLUDE_DIR AND MOSQUITTO_LIBRARY)
+  target_compile_definitions(aqm_common PUBLIC AQM_HAVE_MQTT=1)
+  target_include_directories(aqm_common PRIVATE ${MOSQUITTO_INCLUDE_DIR})
+  target_link_libraries(aqm_common PUBLIC ${MOSQUITTO_LIBRARY})
+  message(STATUS "MQTT: libmosquitto found")
+else()
+  message(WARNING "MQTT disabled: install libmosquitto-dev")
+endif()

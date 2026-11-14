@@ -4,8 +4,10 @@
 #include "aqm/avg.h"
 #include "aqm/button.h"
 #include "aqm/calib.h"
+#include "aqm/json.h"
 #include "aqm/led.h"
 #include "aqm/log.h"
+#include "aqm/mqtt.h"
 #include "aqm/notify.h"
 #include "aqm/orient.h"
 #include "aqm/proc.h"
@@ -41,6 +43,8 @@
 
 /* rolling 1/5/10/20 min + 24 h averages of the samples this stage receives */
 static aqm_avg_t g_avg;
+/* MQTT publisher: NULL when disabled/not configured */
+static aqm_mqtt_t *g_mqtt;
 
 /* local display state: everything optional, the pipeline runs without it */
 typedef struct {
@@ -179,6 +183,11 @@ static void drain_alarms(mqd_t q, display_t *dp)
 
     while (aqm_alarm_recv(q, &a) == 0) {
         aqm_log("report", "ALARM p%-2u seq %u: %s", a.prio, a.seq, a.text);
+        if (g_mqtt) {
+            char js[256];
+            if (aqm_json_alarm(js, sizeof(js), &a) > 0)
+                aqm_mqtt_publish(g_mqtt, "alarm", js, 1, 0);
+        }
         if (dp->have_lcd && alarm_banner(&a, &dp->banner)) {
             dp->banner_until_ns = mono_ns() + (int64_t)BANNER_MS * 1000000LL;
             dp->page = AQM_PAGE_MAIN;   /* an alert always shows on the main page */
@@ -349,6 +358,11 @@ static void log_averages(void)
             n += snprintf(line + n, sizeof(line) - (size_t)n, " %s --/-- |",
                           aqm_avg_window_name(w));
     }
+    if (g_mqtt) {
+        char js[768];
+        if (aqm_json_avg(js, sizeof(js), &g_avg, (long long)time(NULL)) > 0)
+            aqm_mqtt_publish(g_mqtt, "avg", js, 1, 1);   /* retained: latest averages */
+    }
     if (aqi24 >= 0)
         aqm_log("report", "avg PM2.5/PM10:%s AQI(24h) %d %s", line, aqi24,
                 aqm_aqi_cat_name(aqm_aqi_category(aqi24)));
@@ -377,6 +391,7 @@ int main(int argc, char **argv)
     }
 
     seed_averages();
+    g_mqtt = aqm_mqtt_start(getenv("AQM_MQTT") ? getenv("AQM_MQTT") : "config/mqtt.conf");
     display_init(&disp);
 
     while (!aqm_should_stop() && aqm_running(shm)) {
@@ -414,6 +429,11 @@ int main(int argc, char **argv)
                              s.seq, s.pm25_cal, s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat));
                 aqm_notify(st);
             }
+            if (g_mqtt) {
+                char js[384];
+                if (aqm_json_sample(js, sizeof(js), &s) > 0)
+                    aqm_mqtt_publish(g_mqtt, "sample", js, 0, 0);
+            }
             if (aqm_avg_push(&g_avg, &s))
                 log_averages();
             disp.last = s;
@@ -429,6 +449,7 @@ int main(int argc, char **argv)
 
     aqm_log("report", "stopping");
     aqm_notify("STOPPING=1");
+    aqm_mqtt_stop(g_mqtt);
     display_close(&disp);
     mq_close(q);
     aqm_alarm_unlink();
