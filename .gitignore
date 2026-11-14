@@ -56,3 +56,5 @@ dkms.conf
 build/
 logs/
 data/
+/*.gif
+/*.bin
