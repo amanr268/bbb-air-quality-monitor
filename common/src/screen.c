@@ -110,3 +110,103 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
         centre(d, 112, t, sm);
     }
 }
+
+/* one "label ... value" row; if both do not fit side by side (portrait IP),
+ * the value goes right-aligned on the next row. Returns the next y. */
+static int row(ssd1306_t *d, int y, const char *label, const char *value, const aqm_font_t *f)
+{
+    int w = ssd1306_width(d), vw = ssd1306_text_width(value, f);
+
+    ssd1306_text(d, 0, y, label, f);
+    if (ssd1306_text_width(label, f) + f->w + vw > w)
+        y += f->h;
+    if (vw > w) {
+        /* still too wide (an IP in portrait): break after the last '.'
+         * that fits, e.g. "192.168." / "1.14" */
+        char head[24];
+        int max = w / f->w, cut = 0, i;
+
+        for (i = 0; value[i] && i < max; i++)
+            if (value[i] == '.')
+                cut = i + 1;
+        if (cut == 0)
+            cut = max;
+        snprintf(head, sizeof(head), "%.*s", cut, value);
+        ssd1306_text(d, 0, y, head, f);
+        y += f->h;
+        value += cut;
+        vw = ssd1306_text_width(value, f);
+    }
+    ssd1306_text(d, w - vw, y, value, f);
+    return y + f->h;
+}
+
+static void fmt_uptime(long s, char *buf, size_t n)
+{
+    if (s >= 86400)
+        snprintf(buf, n, "%ldd%02ldh", s / 86400, (s % 86400) / 3600);
+    else
+        snprintf(buf, n, "%ldh%02ldm", s / 3600, (s % 3600) / 60);
+}
+
+void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
+                          const aqm_sysinfo_t *si)
+{
+    static const char *title[AQM_PAGE_COUNT] = { "Air", "Particles", "Climate", "System" };
+    const aqm_font_t *f = &font_6_10;
+    int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
+    int pm_ok = !(s->status & AQM_ST_PMS_FAULT), y;
+    char a[24], b[24], n[8];
+
+    if (page <= AQM_PAGE_MAIN || page >= AQM_PAGE_COUNT)
+        return;
+    ssd1306_clear(d);
+
+    /* header: title + page number, then a rule */
+    snprintf(n, sizeof(n), "%d/%d", page + 1, AQM_PAGE_COUNT);
+    if (portrait) {
+        centre(d, 0, title[page], f);
+        centre(d, f->h, n, f);
+        y = 2 * f->h + 1;
+    } else {
+        ssd1306_text(d, 0, 0, title[page], f);
+        ssd1306_text(d, w - ssd1306_text_width(n, f), 0, n, f);
+        y = f->h + 1;
+    }
+    ssd1306_line(d, 0, y, w - 1, y);
+    y += 3;
+
+    switch (page) {
+    case AQM_PAGE_PARTICLES:
+        if (pm_ok) snprintf(a, sizeof(a), "%u", s->pm1);
+        else       snprintf(a, sizeof(a), "--");
+        y = row(d, y, "PM1.0", a, f);
+        if (pm_ok) snprintf(a, sizeof(a), "%.0f", s->pm25_cal);
+        y = row(d, y, "PM2.5", a, f);
+        if (pm_ok) snprintf(a, sizeof(a), "%.0f", s->pm10_cal);
+        y = row(d, y, "PM10", a, f);
+        if (pm_ok) snprintf(a, sizeof(a), "%u", s->aqi);
+        y = row(d, y, "AQI", a, f);
+        if (portrait)
+            centre(d, y + 4, "ug/m3", f);
+        break;
+    case AQM_PAGE_CLIMATE:
+        snprintf(a, sizeof(a), "%u", s->tvoc_ppb);
+        y = row(d, y, "TVOC", a, f);
+        if (s->eco2_ppm) snprintf(a, sizeof(a), "%u", s->eco2_ppm);
+        else             snprintf(a, sizeof(a), "--");
+        y = row(d, y, "eCO2", a, f);
+        snprintf(a, sizeof(a), "%.1fC", s->temp_c);
+        y = row(d, y, "Temp", a, f);
+        snprintf(a, sizeof(a), "%.0f%%", s->rh_pct);
+        y = row(d, y, "RH", a, f);
+        break;
+    case AQM_PAGE_SYSTEM:
+        y = row(d, y, "IP", (si && si->ip[0]) ? si->ip : "none", f);
+        fmt_uptime(si ? si->uptime_s : 0, b, sizeof(b));
+        y = row(d, y, "Up", b, f);
+        snprintf(a, sizeof(a), "%u", s->seq);
+        y = row(d, y, "Seq", a, f);
+        break;
+    }
+}

@@ -1,6 +1,8 @@
 #include "aqm/adxl345.h"
 #include "aqm/alarm.h"
 #include "aqm/aqi.h"
+#include "aqm/button.h"
+#include "aqm/led.h"
 #include "aqm/log.h"
 #include "aqm/notify.h"
 #include "aqm/orient.h"
@@ -11,10 +13,15 @@
 #include "aqm/ssd1306.h"
 #include "aqm/timeutil.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <linux/input.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sysinfo.h>
 
 #define I2C_DEV         "/dev/i2c-2"
 #define OLED_ADDR       0x3C
@@ -23,6 +30,9 @@
 #define BANNER_MS       10000         /* how long an alert stays on screen       */
 #define ORIENT_HOLD     5             /* samples (= 0.5 s at 10 Hz)              */
 #define OLED_RETRY_MS   2000          /* retry a missing OLED this often         */
+#define BUTTON_NAME     "aqm-keys"    /* gpio-keys node in the DT overlay        */
+#define LED_NAME        "aqm:alarm"   /* gpio-leds node in the DT overlay        */
+#define PAGE_MS         30000         /* info page falls back to main after this */
 
 /* local display state: everything optional, the pipeline runs without it */
 typedef struct {
@@ -37,6 +47,13 @@ typedef struct {
     int          dirty;               /* redraw needed                           */
     int64_t      retry_ns;            /* next OLED open attempt                  */
     int          warned;              /* open failure already logged             */
+    int          page;                /* AQM_PAGE_*, button cycles it            */
+    int64_t      page_until_ns;       /* back to the main page after this        */
+    int          btn_fd, led_fd;      /* -1 = not (yet) available                */
+    int          btn_warned, led_warned;
+    int64_t      io_retry_ns;
+    int          led_on;              /* current LED state                       */
+    unsigned     tick;                /* 10 Hz tick counter (LED blink phase)    */
 } display_t;
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
@@ -78,11 +95,41 @@ static void display_open(display_t *dp)
     dp->dirty = 1;                     /* show the last sample right away */
 }
 
+/* button and LED come from the DT overlay; like the OLED they may be
+ * root-only for a moment at boot, so they are retried too */
+static void io_open(display_t *dp)
+{
+    int rc;
+
+    if (dp->btn_fd < 0) {
+        if ((rc = aqm_button_open(BUTTON_NAME)) >= 0) {
+            dp->btn_fd = rc;
+            aqm_log("report", "button (%s) ready: press to change page", BUTTON_NAME);
+        } else if (!dp->btn_warned) {
+            aqm_log("report", "button %s not available (%s), retrying", BUTTON_NAME, strerror(-rc));
+            dp->btn_warned = 1;
+        }
+    }
+    if (dp->led_fd < 0) {
+        if ((rc = aqm_led_open(LED_NAME)) >= 0) {
+            dp->led_fd = rc;
+            aqm_led_set(dp->led_fd, 0);
+            aqm_log("report", "LED (%s) ready", LED_NAME);
+        } else if (!dp->led_warned) {
+            aqm_log("report", "LED %s not available (%s), retrying", LED_NAME, strerror(-rc));
+            dp->led_warned = 1;
+        }
+    }
+    dp->io_retry_ns = mono_ns() + (int64_t)OLED_RETRY_MS * 1000000LL;
+}
+
 static void display_init(display_t *dp)
 {
     memset(dp, 0, sizeof(*dp));
     dp->acc.fd = -1;
+    dp->btn_fd = dp->led_fd = -1;
     display_open(dp);
+    io_open(dp);
 }
 
 static void display_close(display_t *dp)
@@ -91,6 +138,8 @@ static void display_close(display_t *dp)
         ssd1306_close(&dp->lcd);
     if (dp->have_acc)
         adxl345_close(&dp->acc);
+    aqm_button_close(dp->btn_fd);
+    aqm_led_close(dp->led_fd);          /* leaves the LED off */
 }
 
 /* on-screen alert for an alarm (warnings and critical only) */
@@ -124,8 +173,69 @@ static void drain_alarms(mqd_t q, display_t *dp)
         aqm_log("report", "ALARM p%-2u seq %u: %s", a.prio, a.seq, a.text);
         if (dp->have_lcd && alarm_banner(&a, &dp->banner)) {
             dp->banner_until_ns = mono_ns() + (int64_t)BANNER_MS * 1000000LL;
+            dp->page = AQM_PAGE_MAIN;   /* an alert always shows on the main page */
             dp->dirty = 1;
         }
+    }
+}
+
+/* first non-loopback IPv4 address (wlan0 on the BBBW) */
+static void get_sysinfo(aqm_sysinfo_t *si)
+{
+    struct ifaddrs *ifa, *i;
+    struct sysinfo sy;
+
+    memset(si, 0, sizeof(*si));
+    if (sysinfo(&sy) == 0)
+        si->uptime_s = sy.uptime;
+    if (getifaddrs(&ifa) != 0)
+        return;
+    for (i = ifa; i; i = i->ifa_next) {
+        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && strcmp(i->ifa_name, "lo") != 0) {
+            inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, si->ip, sizeof(si->ip));
+            break;
+        }
+    }
+    freeifaddrs(ifa);
+}
+
+/* LED: fast blink = PM sensor fault, slow blink = AQI Poor or worse, else off */
+static void led_tick(display_t *dp)
+{
+    int want = 0;
+
+    if (dp->led_fd < 0 || !dp->have_sample)
+        return;
+    if (dp->last.status & AQM_ST_PMS_FAULT)
+        want = dp->tick & 1;                        /* 5 Hz  */
+    else if (dp->last.aqi_cat >= AQI_POOR)
+        want = (dp->tick / 5) & 1;                  /* 1 Hz  */
+    if (want != dp->led_on && aqm_led_set(dp->led_fd, want) == 0)
+        dp->led_on = want;
+}
+
+/* short press: next page; info pages time out back to the main page */
+static void button_tick(display_t *dp)
+{
+    int n;
+
+    if (dp->btn_fd < 0)
+        return;
+    n = aqm_button_presses(dp->btn_fd, KEY_PROG1);
+    if (n < 0) {
+        aqm_log("report", "button lost (%s), retrying", strerror(-n));
+        aqm_button_close(dp->btn_fd);
+        dp->btn_fd = -1;
+        return;
+    }
+    if (n > 0 && dp->have_lcd) {
+        dp->page = (dp->page + n) % AQM_PAGE_COUNT;
+        dp->page_until_ns = mono_ns() + (int64_t)PAGE_MS * 1000000LL;
+        dp->dirty = 1;
+    }
+    if (dp->page != AQM_PAGE_MAIN && mono_ns() >= dp->page_until_ns) {
+        dp->page = AQM_PAGE_MAIN;
+        dp->dirty = 1;
     }
 }
 
@@ -133,6 +243,12 @@ static void display_tick(display_t *dp)
 {
     float gx, gy, gz;
     int rc;
+
+    dp->tick++;
+    if ((dp->btn_fd < 0 || dp->led_fd < 0) && mono_ns() >= dp->io_retry_ns)
+        io_open(dp);
+    button_tick(dp);
+    led_tick(dp);
 
     if (!dp->have_lcd) {
         if (mono_ns() < dp->retry_ns)
@@ -155,7 +271,13 @@ static void display_tick(display_t *dp)
     }
 
     if (dp->dirty && dp->have_sample) {
-        aqm_screen_draw(&dp->lcd, &dp->last, &dp->banner);
+        if (dp->page == AQM_PAGE_MAIN) {
+            aqm_screen_draw(&dp->lcd, &dp->last, &dp->banner);
+        } else {
+            aqm_sysinfo_t si;
+            get_sysinfo(&si);
+            aqm_screen_draw_page(&dp->lcd, &dp->last, dp->page, &si);
+        }
         if ((rc = ssd1306_flush(&dp->lcd)) != 0)
             aqm_log("report", "OLED write failed: %s", strerror(-rc));
         dp->dirty = 0;

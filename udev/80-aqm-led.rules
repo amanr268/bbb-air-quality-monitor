@@ -1,0 +1,7 @@
+# Let the gpio group (user aman) drive the alarm LED from the DT overlay
+# without root: /sys/class/leds/aqm:alarm/brightness
+# Install: sudo cp udev/80-aqm-led.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload && sudo udevadm trigger -s leds
+SUBSYSTEM=="leds", KERNEL=="aqm:alarm", ACTION=="add", \
+  RUN+="/bin/chgrp gpio /sys/class/leds/%k/brightness /sys/class/leds/%k/trigger", \
+  RUN+="/bin/chmod g+w /sys/class/leds/%k/brightness /sys/class/leds/%k/trigger"
