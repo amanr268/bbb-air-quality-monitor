@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 #include <stdlib.h>
+#include <string.h>
 
 struct aqm_store {
     sqlite3      *db;
@@ -119,6 +120,42 @@ int64_t aqm_store_count(aqm_store_t *st)
         n = sqlite3_column_int64(st->count, 0);
     sqlite3_reset(st->count);
     return n;
+}
+
+int64_t aqm_store_each_since(aqm_store_t *st, int64_t since,
+                             int (*cb)(const aqm_sample_t *s, void *ctx), void *ctx)
+{
+    sqlite3_stmt *q;
+    int64_t n = 0;
+    int rc;
+
+    if (sqlite3_prepare_v2(st->db,
+            "SELECT seq, t_wall, status, pm1, pm25, pm10, tvoc, eco2, aht_t_raw, aht_rh_raw"
+            " FROM samples WHERE t_wall >= ? ORDER BY t_wall, rowid",
+            -1, &q, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(q, 1, since);
+
+    while ((rc = sqlite3_step(q)) == SQLITE_ROW) {
+        aqm_sample_t s;
+
+        memset(&s, 0, sizeof(s));
+        s.seq        = (uint32_t)sqlite3_column_int64(q, 0);
+        s.t_wall_s   = sqlite3_column_int64(q, 1);
+        s.status     = (uint32_t)sqlite3_column_int64(q, 2);
+        s.pm1        = (uint16_t)sqlite3_column_int(q, 3);
+        s.pm25       = (uint16_t)sqlite3_column_int(q, 4);
+        s.pm10       = (uint16_t)sqlite3_column_int(q, 5);
+        s.tvoc_ppb   = (uint16_t)sqlite3_column_int(q, 6);
+        s.eco2_ppm   = (uint16_t)sqlite3_column_int(q, 7);
+        s.aht_t_raw  = (uint32_t)sqlite3_column_int64(q, 8);
+        s.aht_rh_raw = (uint32_t)sqlite3_column_int64(q, 9);
+        n++;
+        if (cb(&s, ctx))
+            break;
+    }
+    sqlite3_finalize(q);
+    return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? n : -1;
 }
 
 const char *aqm_store_errmsg(aqm_store_t *st)

@@ -3,6 +3,7 @@
 #include "aqm/aqi.h"
 #include "aqm/avg.h"
 #include "aqm/button.h"
+#include "aqm/calib.h"
 #include "aqm/led.h"
 #include "aqm/log.h"
 #include "aqm/notify.h"
@@ -11,6 +12,7 @@
 #include "aqm/screen.h"
 #include "aqm/shm.h"
 #include "aqm/sig.h"
+#include "aqm/store.h"
 #include "aqm/ssd1306.h"
 #include "aqm/timeutil.h"
 
@@ -23,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysinfo.h>
+#include <time.h>
+#include <unistd.h>
 
 #define I2C_DEV         "/dev/i2c-2"
 #define OLED_ADDR       0x3C
@@ -288,6 +292,45 @@ static void display_tick(display_t *dp)
     }
 }
 
+/* replay one stored row: same calibration as `convert`, then into the averages */
+static int seed_cb(const aqm_sample_t *row, void *ctx)
+{
+    aqm_sample_t s = *row;
+
+    aqm_calib_apply((const aqm_calib_t *)ctx, &s);
+    aqm_avg_seed_row(&g_avg, &s);
+    return aqm_should_stop();
+}
+
+/* after a restart, rebuild the averages from the last 24 h in the offline
+ * buffer instead of waiting 16 h for a valid 24 h AQI */
+static void seed_averages(void)
+{
+    const char *db = getenv("AQM_DB") ? getenv("AQM_DB") : "data/aqm.db";
+    const char *cp = getenv("AQM_CALIB") ? getenv("AQM_CALIB") : "config/calib.conf";
+    int64_t now = (int64_t)time(NULL), rows, t0 = mono_ns();
+    aqm_store_t *st;
+    aqm_calib_t cal;
+    int mins;
+
+    aqm_calib_defaults(&cal);
+    if (aqm_calib_load(&cal, cp) != 0)
+        aqm_log("report", "seed: %s not readable, using default calibration", cp);
+
+    if (access(db, R_OK) != 0 || !(st = aqm_store_open(db))) {
+        aqm_log("report", "seed: no offline buffer (%s), averages start empty", db);
+        aqm_avg_init(&g_avg);
+        return;
+    }
+    aqm_avg_seed_begin(&g_avg, now);
+    rows = aqm_store_each_since(st, now - 86400, seed_cb, &cal);
+    mins = aqm_avg_seed_end(&g_avg);
+    aqm_store_close(st);
+    aqm_log("report", "seed: %lld rows from %s -> %d min of 24 h history (%lld ms)%s",
+            (long long)rows, db, mins, (long long)((mono_ns() - t0) / 1000000),
+            mins >= AQM_AVG_DAY_MIN ? ", 24 h AQI ready" : "");
+}
+
 /* once a minute: PM2.5 / PM10 means per window and the 24 h AQI status */
 static void log_averages(void)
 {
@@ -333,6 +376,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    seed_averages();
     display_init(&disp);
 
     while (!aqm_should_stop() && aqm_running(shm)) {

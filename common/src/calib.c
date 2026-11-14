@@ -39,3 +39,19 @@ int aqm_calib_load(aqm_calib_t *c, const char *path)
     *c = t;
     return 0;
 }
+
+static float clampf(float v, float lo, float hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void aqm_calib_apply(const aqm_calib_t *c, aqm_sample_t *s)
+{
+    /* AHT21 datasheet: T = raw / 2^20 * 200 - 50, RH = raw / 2^20 * 100 */
+    s->temp_c = (float)s->aht_t_raw / 1048576.0f * 200.0f - 50.0f + c->temp_offset;
+    s->rh_pct = clampf((float)s->aht_rh_raw / 1048576.0f * 100.0f + c->rh_offset,
+                       0.0f, 100.0f);
+
+    s->pm25_cal = clampf((float)s->pm25 * c->pm25_gain + c->pm25_offset, 0.0f, 1000.0f);
+    s->pm10_cal = clampf((float)s->pm10 * c->pm10_gain + c->pm10_offset, 0.0f, 1000.0f);
+}

@@ -45,6 +45,12 @@ typedef struct {
     int      dhead;
     double   dsum[AQM_M_COUNT];
     int      dcnt[AQM_M_COUNT];
+
+    /* seeding state (aqm_avg_seed_*) */
+    int64_t  seed_now, seed_min, seed_live_from;
+    double   ssum[AQM_M_COUNT];
+    int      scnt[AQM_M_COUNT];
+    int      seeded_min;
 } aqm_avg_t;
 
 void aqm_avg_init(aqm_avg_t *a);
@@ -62,5 +68,18 @@ int  aqm_avg_get(const aqm_avg_t *a, int w, int m, float *mean);
 int  aqm_avg_aqi_24h(const aqm_avg_t *a, int *minutes);
 
 const char *aqm_avg_window_name(int w);     /* "1m", "5m", ... "24h" */
+
+/*
+ * Seeding from stored history (e.g. the SQLite buffer) after a restart, so
+ * the 24 h mean does not start from zero. Feed rows oldest first, already
+ * calibrated, with t_wall_s set:
+ *   rows older than 20 min  -> grouped by wall-clock minute into the 24 h ring
+ *                              (missing minutes are stored as "no data")
+ *   rows of the last 20 min -> pushed like live samples (fills 1..20 min windows)
+ * aqm_avg_seed_end() returns the number of valid 24 h minutes.
+ */
+void aqm_avg_seed_begin(aqm_avg_t *a, int64_t now_wall_s);
+void aqm_avg_seed_row(aqm_avg_t *a, const aqm_sample_t *s);
+int  aqm_avg_seed_end(aqm_avg_t *a);
 
 #endif

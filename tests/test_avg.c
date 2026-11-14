@@ -1,4 +1,5 @@
 /* rolling averages: window means, fault exclusion, ring wrap, 24 h minutes */
+#include "aqm/aqi.h"
 #include "aqm/avg.h"
 
 #include <math.h>
@@ -76,6 +77,67 @@ int main(void)
         push(40, i < 40 ? AQM_ST_PMS_FAULT : 0);    /* only 20/60 valid */
     CHECK(aqm_avg_get(&A, AQM_W_24H, AQM_M_PM25, &m) == 0);
     CHECK(aqm_avg_get(&A, AQM_W_24H, AQM_M_TEMP, &m) == 1 && NEAR(m, 25));
+
+    /* seeding: 20 h of history at 1 Hz ending now, PM2.5 80 / PM10 160 */
+    {
+        const int64_t now = 1800000000;
+        aqm_sample_t s;
+        int64_t t;
+
+        memset(&s, 0, sizeof(s));
+        s.pm25_cal = 80; s.pm10_cal = 160; s.temp_c = 25; s.rh_pct = 50;
+        aqm_avg_seed_begin(&A, now);
+        for (t = now - 20 * 3600; t < now; t++) {
+            s.t_wall_s = t;
+            aqm_avg_seed_row(&A, &s);
+        }
+        mins = aqm_avg_seed_end(&A);
+        CHECK(mins > 19 * 60 && mins <= 20 * 60);            /* ~1200 min    */
+        CHECK(aqm_avg_get(&A, AQM_W_24H, AQM_M_PM25, &m) == mins && NEAR(m, 80));
+        CHECK(aqm_avg_get(&A, AQM_W_20M, AQM_M_PM25, &m) == 1200 && NEAR(m, 80));
+        CHECK(aqm_avg_aqi_24h(&A, NULL) == aqm_aqi_pm10(160) ||
+              aqm_avg_aqi_24h(&A, NULL) == aqm_aqi_pm25(80));  /* >= 16 h: ready */
+        CHECK(aqm_avg_aqi_24h(&A, NULL) > 0);
+    }
+
+    /* seeding with the board off for the last 10 h: those minutes are empty,
+     * and the short windows stay empty */
+    {
+        const int64_t now = 1800000000;
+        aqm_sample_t s;
+        int64_t t;
+
+        memset(&s, 0, sizeof(s));
+        s.pm25_cal = 50; s.pm10_cal = 50;
+        aqm_avg_seed_begin(&A, now);
+        for (t = now - 30 * 3600; t < now - 10 * 3600; t++) {   /* rows end 10 h ago */
+            s.t_wall_s = t;
+            aqm_avg_seed_row(&A, &s);
+        }
+        mins = aqm_avg_seed_end(&A);
+        CHECK(mins >= 14 * 60 - 2 && mins <= 14 * 60 + 1);      /* only 14 h inside 24 h */
+        CHECK(aqm_avg_aqi_24h(&A, NULL) == -1);                  /* < 16 h */
+        CHECK(aqm_avg_get(&A, AQM_W_1M, AQM_M_PM25, &m) == 0);
+    }
+
+    /* faulty rows are excluded while seeding too */
+    {
+        const int64_t now = 1800000000;
+        aqm_sample_t s;
+        int64_t t;
+
+        memset(&s, 0, sizeof(s));
+        aqm_avg_seed_begin(&A, now);
+        for (t = now - 3 * 3600; t < now; t++) {
+            int bad = (t / 60) % 2;                              /* every other minute */
+            s.t_wall_s = t;
+            s.status = bad ? AQM_ST_PMS_FAULT : 0;
+            s.pm25_cal = bad ? 999 : 40;
+            aqm_avg_seed_row(&A, &s);
+        }
+        aqm_avg_seed_end(&A);
+        CHECK(aqm_avg_get(&A, AQM_W_24H, AQM_M_PM25, &m) > 0 && NEAR(m, 40));
+    }
 
     printf("avg ok\n");
     return 0;

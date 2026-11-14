@@ -33,20 +33,11 @@ static void load_calib(aqm_calib_t *cal)
             cal->temp_offset, cal->rh_offset);
 }
 
-static float clampf(float v, float lo, float hi)
-{
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
+/* raw -> calibrated now lives in calib.c (aqm_calib_apply), shared with
+ * report, which replays stored rows through the same conversion */
 static void convert(aqm_sample_t *s, const aqm_calib_t *cal)
 {
-    /* AHT21 datasheet: T = raw / 2^20 * 200 - 50, RH = raw / 2^20 * 100 */
-    s->temp_c = (float)s->aht_t_raw / 1048576.0f * 200.0f - 50.0f + cal->temp_offset;
-    s->rh_pct = clampf((float)s->aht_rh_raw / 1048576.0f * 100.0f + cal->rh_offset,
-                       0.0f, 100.0f);
-
-    s->pm25_cal = clampf((float)s->pm25 * cal->pm25_gain + cal->pm25_offset, 0.0f, 1000.0f);
-    s->pm10_cal = clampf((float)s->pm10 * cal->pm10_gain + cal->pm10_offset, 0.0f, 1000.0f);
+    aqm_calib_apply(cal, s);
 }
 
 int main(int argc, char **argv)

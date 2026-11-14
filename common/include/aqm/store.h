@@ -19,6 +19,12 @@ int          aqm_store_prune(aqm_store_t *st, int64_t older_than_s);
 /* total rows, or -1 */
 int64_t      aqm_store_count(aqm_store_t *st);
 
+/* call cb for every row with t_wall >= since, oldest first. The sample has
+ * the raw fields, status, seq and t_wall_s set (no calibrated values).
+ * cb returns non-zero to stop. Returns rows visited or -1. */
+int64_t      aqm_store_each_since(aqm_store_t *st, int64_t since,
+                                  int (*cb)(const aqm_sample_t *s, void *ctx), void *ctx);
+
 const char  *aqm_store_errmsg(aqm_store_t *st);
 
 #endif
