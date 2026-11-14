@@ -1,6 +1,7 @@
 #ifndef AQM_SCREEN_H
 #define AQM_SCREEN_H
 
+#include "aqm/avg.h"
 #include "aqm/ssd1306.h"
 #include "aqm/types.h"
 
@@ -20,8 +21,8 @@ typedef struct {
 void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *banner);
 
 /* extra pages, cycled with the button; page MAIN is aqm_screen_draw() */
-enum { AQM_PAGE_MAIN = 0, AQM_PAGE_PARTICLES, AQM_PAGE_CLIMATE, AQM_PAGE_SYSTEM,
-       AQM_PAGE_COUNT };
+enum { AQM_PAGE_MAIN = 0, AQM_PAGE_PARTICLES, AQM_PAGE_AVERAGES, AQM_PAGE_CLIMATE,
+       AQM_PAGE_SYSTEM, AQM_PAGE_COUNT };
 
 typedef struct {
     char ip[16];        /* "" = no network */
@@ -29,8 +30,9 @@ typedef struct {
 } aqm_sysinfo_t;
 
 /* Draw info page `page` (PARTICLES..SYSTEM) in either orientation.
- * si is only used by the SYSTEM page. Call ssd1306_flush() afterwards. */
+ * si: SYSTEM page; avg: PARTICLES (24 h AQI) and AVERAGES pages (may be NULL).
+ * Call ssd1306_flush() afterwards. */
 void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
-                          const aqm_sysinfo_t *si);
+                          const aqm_sysinfo_t *si, const aqm_avg_t *avg);
 
 #endif

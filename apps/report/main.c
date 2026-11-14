@@ -1,6 +1,7 @@
 #include "aqm/adxl345.h"
 #include "aqm/alarm.h"
 #include "aqm/aqi.h"
+#include "aqm/avg.h"
 #include "aqm/button.h"
 #include "aqm/led.h"
 #include "aqm/log.h"
@@ -33,6 +34,9 @@
 #define BUTTON_NAME     "aqm-keys"    /* gpio-keys node in the DT overlay        */
 #define LED_NAME        "aqm:alarm"   /* gpio-leds node in the DT overlay        */
 #define PAGE_MS         30000         /* info page falls back to main after this */
+
+/* rolling 1/5/10/20 min + 24 h averages of the samples this stage receives */
+static aqm_avg_t g_avg;
 
 /* local display state: everything optional, the pipeline runs without it */
 typedef struct {
@@ -276,12 +280,37 @@ static void display_tick(display_t *dp)
         } else {
             aqm_sysinfo_t si;
             get_sysinfo(&si);
-            aqm_screen_draw_page(&dp->lcd, &dp->last, dp->page, &si);
+            aqm_screen_draw_page(&dp->lcd, &dp->last, dp->page, &si, &g_avg);
         }
         if ((rc = ssd1306_flush(&dp->lcd)) != 0)
             aqm_log("report", "OLED write failed: %s", strerror(-rc));
         dp->dirty = 0;
     }
+}
+
+/* once a minute: PM2.5 / PM10 means per window and the 24 h AQI status */
+static void log_averages(void)
+{
+    char line[256];
+    int w, n = 0, mins, aqi24 = aqm_avg_aqi_24h(&g_avg, &mins);
+
+    for (w = 0; w < AQM_W_COUNT; w++) {
+        float a, b;
+        int ok25 = aqm_avg_get(&g_avg, w, AQM_M_PM25, &a) > 0;
+        int ok10 = aqm_avg_get(&g_avg, w, AQM_M_PM10, &b) > 0;
+
+        if (ok25 && ok10)
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " %s %.0f/%.0f |",
+                          aqm_avg_window_name(w), a, b);
+        else
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " %s --/-- |",
+                          aqm_avg_window_name(w));
+    }
+    if (aqi24 >= 0)
+        aqm_log("report", "avg PM2.5/PM10:%s AQI(24h) %d %s", line, aqi24,
+                aqm_aqi_cat_name(aqm_aqi_category(aqi24)));
+    else
+        aqm_log("report", "avg PM2.5/PM10:%s AQI(24h) needs 16 h, have %d min", line, mins);
 }
 
 int main(int argc, char **argv)
@@ -341,6 +370,8 @@ int main(int argc, char **argv)
                              s.seq, s.pm25_cal, s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat));
                 aqm_notify(st);
             }
+            if (aqm_avg_push(&g_avg, &s))
+                log_averages();
             disp.last = s;
             disp.have_sample = 1;
             disp.dirty = 1;

@@ -149,10 +149,26 @@ static void fmt_uptime(long s, char *buf, size_t n)
         snprintf(buf, n, "%ldh%02ldm", s / 3600, (s % 3600) / 60);
 }
 
-void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
-                          const aqm_sysinfo_t *si)
+/* "label  pm25  pm10" averages row: values right-aligned in two columns */
+static int avg_row(ssd1306_t *d, int y, const aqm_avg_t *avg, int win, const aqm_font_t *f)
 {
-    static const char *title[AQM_PAGE_COUNT] = { "Air", "Particles", "Climate", "System" };
+    int w = ssd1306_width(d);
+    int col1 = w - (w < ssd1306_height(d) ? 4 : 7) * f->w;  /* right edge of PM2.5 column */
+    char a[8] = "--", b[8] = "--";
+    float m;
+
+    if (avg && aqm_avg_get(avg, win, AQM_M_PM25, &m) > 0) snprintf(a, sizeof(a), "%.0f", m);
+    if (avg && aqm_avg_get(avg, win, AQM_M_PM10, &m) > 0) snprintf(b, sizeof(b), "%.0f", m);
+    ssd1306_text(d, 0, y, aqm_avg_window_name(win), f);
+    ssd1306_text(d, col1 - ssd1306_text_width(a, f), y, a, f);
+    ssd1306_text(d, w - ssd1306_text_width(b, f), y, b, f);
+    return y + f->h;
+}
+
+void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
+                          const aqm_sysinfo_t *si, const aqm_avg_t *avg)
+{
+    static const char *title[AQM_PAGE_COUNT] = { "Air", "Particles", "Averages", "Climate", "System" };
     const aqm_font_t *f = &font_6_10;
     int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
     int pm_ok = !(s->status & AQM_ST_PMS_FAULT), y;
@@ -187,8 +203,33 @@ void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
         y = row(d, y, "PM10", a, f);
         if (pm_ok) snprintf(a, sizeof(a), "%u", s->aqi);
         y = row(d, y, "AQI", a, f);
+        {
+            /* CPCB AQI proper: 24 h means, needs >= 16 h of data */
+            int mins = 0, aqi24 = avg ? aqm_avg_aqi_24h(avg, &mins) : -1;
+
+            if (aqi24 >= 0) snprintf(a, sizeof(a), "%d", aqi24);
+            else            snprintf(a, sizeof(a), "%d/16h", mins / 60);  /* hours collected */
+            y = row(d, y, "AQI24h", a, f);
+        }
         if (portrait)
             centre(d, y + 4, "ug/m3", f);
+        break;
+    case AQM_PAGE_AVERAGES:
+        /* column heads, then one row per window (10 min is logged, not shown) */
+        {
+            int col1 = w - (portrait ? 4 : 7) * f->w;
+            const char *h1 = portrait ? "2.5" : "PM2.5", *h2 = portrait ? "10" : "PM10";
+
+            ssd1306_text(d, col1 - ssd1306_text_width(h1, f), y, h1, f);
+            ssd1306_text(d, w - ssd1306_text_width(h2, f), y, h2, f);
+            y += f->h;
+        }
+        y = avg_row(d, y, avg, AQM_W_1M, f);
+        y = avg_row(d, y, avg, AQM_W_5M, f);
+        if (portrait)                       /* room for all five windows */
+            y = avg_row(d, y, avg, AQM_W_10M, f);
+        y = avg_row(d, y, avg, AQM_W_20M, f);
+        (void)avg_row(d, y, avg, AQM_W_24H, f);
         break;
     case AQM_PAGE_CLIMATE:
         snprintf(a, sizeof(a), "%u", s->tvoc_ppb);

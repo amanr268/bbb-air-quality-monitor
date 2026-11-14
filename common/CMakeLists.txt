@@ -20,6 +20,7 @@ add_library(aqm_common STATIC
   src/notify.c
   src/button.c
   src/led.c
+  src/avg.c
 )
 target_include_directories(aqm_common PUBLIC include)
 target_link_libraries(aqm_common PUBLIC Threads::Threads rt m SQLite::SQLite3)
