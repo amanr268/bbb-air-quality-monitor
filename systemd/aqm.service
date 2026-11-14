@@ -1,0 +1,31 @@
+# Air-quality monitor pipeline.
+# Install:  sudo cp systemd/aqm.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now aqm
+[Unit]
+Description=BBB air-quality monitor (sense/capture/convert/compare/report)
+After=local-fs.target
+# 5 failed starts within 10 min = something is badly wrong: reboot the board
+StartLimitIntervalSec=600
+StartLimitBurst=5
+StartLimitAction=reboot
+
+[Service]
+Type=notify
+# READY / WATCHDOG come from aqm_report, a child of the script
+NotifyAccess=all
+User=aman
+WorkingDirectory=/home/aman/bbb-air-quality-monitor
+ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_service.sh
+ExecStopPost=/bin/rm -f /dev/shm/aqm_shm /dev/mqueue/aqm_alarm
+# no sample through all 5 stages for 5 s -> kill and restart
+WatchdogSec=5
+TimeoutStartSec=30
+TimeoutStopSec=10
+Restart=always
+RestartSec=2
+# allow SCHED_FIFO and mlockall without root
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,7 @@
 #include "aqm/alarm.h"
 #include "aqm/aqi.h"
 #include "aqm/log.h"
+#include "aqm/notify.h"
 #include "aqm/orient.h"
 #include "aqm/proc.h"
 #include "aqm/screen.h"
@@ -21,6 +22,7 @@
 #define TICK_MS         100           /* loop period: accel + ring poll, 10 Hz   */
 #define BANNER_MS       10000         /* how long an alert stays on screen       */
 #define ORIENT_HOLD     5             /* samples (= 0.5 s at 10 Hz)              */
+#define OLED_RETRY_MS   2000          /* retry a missing OLED this often         */
 
 /* local display state: everything optional, the pipeline runs without it */
 typedef struct {
@@ -33,22 +35,29 @@ typedef struct {
     aqm_banner_t banner;              /* alert shown on screen (kind NONE = none) */
     int64_t      banner_until_ns;
     int          dirty;               /* redraw needed                           */
+    int64_t      retry_ns;            /* next OLED open attempt                  */
+    int          warned;              /* open failure already logged             */
 } display_t;
 
-static void display_init(display_t *dp)
+/* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
+ * udev applies its permissions, so a failure is retried from display_tick. */
+static void display_open(display_t *dp)
 {
     const char *cal_path = getenv("AQM_ORIENT") ? getenv("AQM_ORIENT") : "config/orient.conf";
     aqm_orient_cal_t cal;
     int rc;
 
-    memset(dp, 0, sizeof(*dp));
-    dp->acc.fd = -1;
-
     if ((rc = ssd1306_open(&dp->lcd, I2C_DEV, OLED_ADDR)) != 0) {
-        aqm_log("report", "OLED not available (%s): text-only mode", strerror(-rc));
+        if (!dp->warned)
+            aqm_log("report", "OLED not available (%s): text-only, retrying every %d s",
+                    strerror(-rc), OLED_RETRY_MS / 1000);
+        dp->warned = 1;
+        dp->retry_ns = mono_ns() + (int64_t)OLED_RETRY_MS * 1000000LL;
         return;
     }
     dp->have_lcd = 1;
+    if (dp->warned)
+        aqm_log("report", "OLED available now");
 
     if ((rc = aqm_orient_cal_load(&cal, cal_path)) != 0) {
         aqm_log("report", "no orientation calibration (%s): fixed landscape. "
@@ -66,6 +75,14 @@ static void display_init(display_t *dp)
     ssd1306_clear(&dp->lcd);
     ssd1306_text(&dp->lcd, 0, 0, "AQM starting...", &font_6_10);
     ssd1306_flush(&dp->lcd);
+    dp->dirty = 1;                     /* show the last sample right away */
+}
+
+static void display_init(display_t *dp)
+{
+    memset(dp, 0, sizeof(*dp));
+    dp->acc.fd = -1;
+    display_open(dp);
 }
 
 static void display_close(display_t *dp)
@@ -117,8 +134,13 @@ static void display_tick(display_t *dp)
     float gx, gy, gz;
     int rc;
 
-    if (!dp->have_lcd)
-        return;
+    if (!dp->have_lcd) {
+        if (mono_ns() < dp->retry_ns)
+            return;
+        display_open(dp);
+        if (!dp->have_lcd)
+            return;
+    }
 
     if (dp->have_acc && adxl345_read_g(&dp->acc, &gx, &gy, &gz) == 0 &&
         aqm_orient_update(&dp->orient, gx, gy, gz)) {
@@ -184,6 +206,19 @@ int main(int argc, char **argv)
                         s.seq, s.pm25_cal, s.pm10_cal, s.tvoc_ppb, s.temp_c, s.rh_pct,
                         s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat),
                         (long long)((mono_ns() - s.t_mono_ns) / 1000));
+            /* a sample reaching the last stage proves all 5 stages are alive:
+             * pet the systemd watchdog and publish a one-line status */
+            if (!disp.have_sample)
+                aqm_notify("READY=1");
+            {
+                char st[96];
+                if (s.status & AQM_ST_PMS_FAULT)
+                    snprintf(st, sizeof(st), "WATCHDOG=1\nSTATUS=seq %u | PM sensor FAULT", s.seq);
+                else
+                    snprintf(st, sizeof(st), "WATCHDOG=1\nSTATUS=seq %u | PM2.5 %.0f | AQI %u %s",
+                             s.seq, s.pm25_cal, s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat));
+                aqm_notify(st);
+            }
             disp.last = s;
             disp.have_sample = 1;
             disp.dirty = 1;
@@ -196,6 +231,7 @@ int main(int argc, char **argv)
     }
 
     aqm_log("report", "stopping");
+    aqm_notify("STOPPING=1");
     display_close(&disp);
     mq_close(q);
     aqm_alarm_unlink();
