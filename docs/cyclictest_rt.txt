@@ -1,0 +1,8 @@
+cyclictest -m -t1 -p 90 -i 1000 -D 5m -q   (300000 loops, aqm pipeline running)
+kernel: 6.12.111-bone-rt-r73 PREEMPT_RT (BeagleBone Black Wireless, AM335x 1 GHz)
+
+idle:        Min 12 us  Avg 16 us  Max 105 us
+under load:  Min 17 us  Avg 40 us  Max 109 us
+             load = stress-ng --cpu 1 --io 1 --vm 1 --vm-bytes 64M
+
+stock 6.12.111-bone73 for comparison: idle Max 180 us, load Max 711 us
