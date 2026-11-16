@@ -25,6 +25,7 @@ add_library(aqm_common STATIC
   src/mqtt.c
   src/aht21.c
   src/ens160.c
+  src/modbus.c
 )
 target_include_directories(aqm_common PUBLIC include)
 target_link_libraries(aqm_common PUBLIC Threads::Threads rt m SQLite::SQLite3)

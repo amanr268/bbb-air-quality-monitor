@@ -7,6 +7,7 @@
 #include "aqm/json.h"
 #include "aqm/led.h"
 #include "aqm/log.h"
+#include "aqm/modbus.h"
 #include "aqm/mqtt.h"
 #include "aqm/notify.h"
 #include "aqm/orient.h"
@@ -45,6 +46,8 @@
 static aqm_avg_t g_avg;
 /* MQTT publisher: NULL when disabled/not configured */
 static aqm_mqtt_t *g_mqtt;
+/* Modbus RTU slave thread (RS485): NULL when disabled */
+static aqm_modbus_t *g_modbus;
 
 /* local display state: everything optional, the pipeline runs without it */
 typedef struct {
@@ -392,6 +395,7 @@ int main(int argc, char **argv)
 
     seed_averages();
     g_mqtt = aqm_mqtt_start(getenv("AQM_MQTT") ? getenv("AQM_MQTT") : "config/mqtt.conf");
+    g_modbus = aqm_modbus_start(getenv("AQM_MODBUS") ? getenv("AQM_MODBUS") : "config/modbus.conf");
     display_init(&disp);
 
     while (!aqm_should_stop() && aqm_running(shm)) {
@@ -442,6 +446,7 @@ int main(int argc, char **argv)
             }
             if (aqm_avg_push(&g_avg, &s))
                 log_averages();
+            aqm_modbus_update(g_modbus, &s, &g_avg);   /* registers for RS485 masters */
             disp.last = s;
             disp.have_sample = 1;
             disp.dirty = 1;
@@ -456,6 +461,7 @@ int main(int argc, char **argv)
     aqm_log("report", "stopping");
     aqm_notify("STOPPING=1");
     aqm_mqtt_stop(g_mqtt);
+    aqm_modbus_stop(g_modbus);
     display_close(&disp);
     mq_close(q);
     aqm_alarm_unlink();
