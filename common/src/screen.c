@@ -58,9 +58,11 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
 {
     const aqm_font_t *sm = &font_6_10, *big = &font_10_20;
     int w = ssd1306_width(d);
-    char t[8], aqi[8], buf[32], pm25[8], pm10[8];
-    /* a missing PM sensor must never look like clean air */
+    char t[8], aqi[8], buf[32], pm25[8], pm10[8], tv[8], tc[8], rh[8];
+    /* a missing sensor must never look like clean air (or -50 C) */
     int pm_ok = !(s->status & AQM_ST_PMS_FAULT);
+    int ens_ok = !(s->status & AQM_ST_ENS_FAULT);
+    int aht_ok = !(s->status & AQM_ST_AHT_FAULT);
 
     if (banner && banner->kind == AQM_BANNER_NONE)
         banner = NULL;
@@ -74,6 +76,16 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
         snprintf(aqi, sizeof(aqi), "--");
         snprintf(pm25, sizeof(pm25), " --");
         snprintf(pm10, sizeof(pm10), " --");
+    }
+
+    if (ens_ok) snprintf(tv, sizeof(tv), "%3u", s->tvoc_ppb);
+    else        snprintf(tv, sizeof(tv), " --");
+    if (aht_ok) {
+        snprintf(tc, sizeof(tc), "%4.1fC", s->temp_c);
+        snprintf(rh, sizeof(rh), "%2.0f%%", s->rh_pct);
+    } else {
+        snprintf(tc, sizeof(tc), "  --C");
+        snprintf(rh, sizeof(rh), "--%%");
     }
 
     if (w > ssd1306_height(d)) {
@@ -90,7 +102,7 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
         ssd1306_line(d, 0, 33, w - 1, 33);
         snprintf(buf, sizeof(buf), "PM2.5 %s PM10 %s", pm25, pm10);
         ssd1306_text(d, 0, 37, buf, sm);
-        snprintf(buf, sizeof(buf), "TVOC %3u  %4.1fC %2.0f%%", s->tvoc_ppb, s->temp_c, s->rh_pct);
+        snprintf(buf, sizeof(buf), "TVOC %s  %s %s", tv, tc, rh);
         ssd1306_text(d, 0, 51, buf, sm);
     } else {
         /* portrait 64 x 128 */
@@ -103,9 +115,9 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
         ssd1306_line(d, 0, 46, w - 1, 46);
         snprintf(buf, sizeof(buf), "PM2.5 %s", pm25);  ssd1306_text(d, 0, 50, buf, sm);
         snprintf(buf, sizeof(buf), "PM10  %s", pm10);  ssd1306_text(d, 0, 61, buf, sm);
-        snprintf(buf, sizeof(buf), "TVOC  %3u", s->tvoc_ppb);   ssd1306_text(d, 0, 72, buf, sm);
-        snprintf(buf, sizeof(buf), "T  %4.1fC", s->temp_c);     ssd1306_text(d, 0, 83, buf, sm);
-        snprintf(buf, sizeof(buf), "RH    %2.0f%%", s->rh_pct); ssd1306_text(d, 0, 94, buf, sm);
+        snprintf(buf, sizeof(buf), "TVOC  %s", tv);  ssd1306_text(d, 0, 72, buf, sm);
+        snprintf(buf, sizeof(buf), "T  %s", tc);     ssd1306_text(d, 0, 83, buf, sm);
+        snprintf(buf, sizeof(buf), "RH    %s", rh);  ssd1306_text(d, 0, 94, buf, sm);
         ssd1306_line(d, 0, 107, w - 1, 107);
         centre(d, 112, t, sm);
     }
@@ -232,15 +244,22 @@ void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
         (void)avg_row(d, y, avg, AQM_W_24H, f);
         break;
     case AQM_PAGE_CLIMATE:
-        snprintf(a, sizeof(a), "%u", s->tvoc_ppb);
-        y = row(d, y, "TVOC", a, f);
-        if (s->eco2_ppm) snprintf(a, sizeof(a), "%u", s->eco2_ppm);
-        else             snprintf(a, sizeof(a), "--");
-        y = row(d, y, "eCO2", a, f);
-        snprintf(a, sizeof(a), "%.1fC", s->temp_c);
-        y = row(d, y, "Temp", a, f);
-        snprintf(a, sizeof(a), "%.0f%%", s->rh_pct);
-        y = row(d, y, "RH", a, f);
+        {
+            int ens = !(s->status & AQM_ST_ENS_FAULT), aht = !(s->status & AQM_ST_AHT_FAULT);
+
+            if (ens) snprintf(a, sizeof(a), "%u", s->tvoc_ppb);
+            else     snprintf(a, sizeof(a), "--");
+            y = row(d, y, "TVOC", a, f);
+            if (ens && s->eco2_ppm) snprintf(a, sizeof(a), "%u", s->eco2_ppm);
+            else                    snprintf(a, sizeof(a), "--");
+            y = row(d, y, "eCO2", a, f);
+            if (aht) snprintf(a, sizeof(a), "%.1fC", s->temp_c);
+            else     snprintf(a, sizeof(a), "--");
+            y = row(d, y, "Temp", a, f);
+            if (aht) snprintf(a, sizeof(a), "%.0f%%", s->rh_pct);
+            else     snprintf(a, sizeof(a), "--");
+            y = row(d, y, "RH", a, f);
+        }
         break;
     case AQM_PAGE_SYSTEM:
         y = row(d, y, "IP", (si && si->ip[0]) ? si->ip : "none", f);

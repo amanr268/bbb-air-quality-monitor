@@ -23,6 +23,8 @@ add_library(aqm_common STATIC
   src/avg.c
   src/json.c
   src/mqtt.c
+  src/aht21.c
+  src/ens160.c
 )
 target_include_directories(aqm_common PUBLIC include)
 target_link_libraries(aqm_common PUBLIC Threads::Threads rt m SQLite::SQLite3)

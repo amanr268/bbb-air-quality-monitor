@@ -403,19 +403,25 @@ int main(int argc, char **argv)
 
         if (rc == 0) {
             /* TODO Phase 5: MQTT publish, Modbus registers */
-            if (s.status & AQM_ST_PMS_FAULT)
-                aqm_log("report",
-                        "seq %u | PM sensor FAULT (no data) | TVOC %3u ppb | %4.1f C %2.0f%%RH | "
-                        "AQI  -- | e2e %lld us",
-                        s.seq, s.tvoc_ppb, s.temp_c, s.rh_pct,
-                        (long long)((mono_ns() - s.t_mono_ns) / 1000));
-            else
-                aqm_log("report",
-                        "seq %u | PM2.5 %3.0f PM10 %3.0f ug/m3 | TVOC %3u ppb | %4.1f C %2.0f%%RH | "
-                        "AQI %3u %-12s | e2e %lld us",
-                        s.seq, s.pm25_cal, s.pm10_cal, s.tvoc_ppb, s.temp_c, s.rh_pct,
-                        s.aqi, aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat),
-                        (long long)((mono_ns() - s.t_mono_ns) / 1000));
+            {
+                /* faulty sensors print "--", never their zeroed values */
+                char pm[48], voc[16], cli[24], aq[24];
+
+                if (s.status & AQM_ST_PMS_FAULT) {
+                    snprintf(pm, sizeof(pm), "PM sensor FAULT (no data)");
+                    snprintf(aq, sizeof(aq), "AQI  --");
+                } else {
+                    snprintf(pm, sizeof(pm), "PM2.5 %3.0f PM10 %3.0f ug/m3", s.pm25_cal, s.pm10_cal);
+                    snprintf(aq, sizeof(aq), "AQI %3u %-12s", s.aqi,
+                             aqm_aqi_cat_name((aqm_aqi_cat_t)s.aqi_cat));
+                }
+                if (s.status & AQM_ST_ENS_FAULT) snprintf(voc, sizeof(voc), "TVOC  -- ppb");
+                else snprintf(voc, sizeof(voc), "TVOC %3u ppb", s.tvoc_ppb);
+                if (s.status & AQM_ST_AHT_FAULT) snprintf(cli, sizeof(cli), "  -- C --%%RH");
+                else snprintf(cli, sizeof(cli), "%4.1f C %2.0f%%RH", s.temp_c, s.rh_pct);
+                aqm_log("report", "seq %u | %s | %s | %s | %s | e2e %lld us", s.seq, pm, voc,
+                        cli, aq, (long long)((mono_ns() - s.t_mono_ns) / 1000));
+            }
             /* a sample reaching the last stage proves all 5 stages are alive:
              * pet the systemd watchdog and publish a one-line status */
             if (!disp.have_sample)
