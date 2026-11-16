@@ -1,0 +1,6 @@
+[Unit]
+Description=Wi-Fi watchdog (restart iwd if wlan0 has no address)
+
+[Service]
+Type=oneshot
+ExecStart=/home/aman/bbb-air-quality-monitor/systemd/wifi-check.sh
