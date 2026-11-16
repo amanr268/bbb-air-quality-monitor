@@ -108,7 +108,7 @@ aqm_mqtt_t *aqm_mqtt_start(const char *conf_path)
     mosquitto_will_set(m->mosq, will, 7, "offline", 1, true);   /* broker says it for us */
     mosquitto_connect_callback_set(m->mosq, on_connect);
     mosquitto_disconnect_callback_set(m->mosq, on_disconnect);
-    mosquitto_reconnect_delay_set(m->mosq, 1, 30, true);        /* 1, 2, 4 ... 30 s */
+    mosquitto_reconnect_delay_set(m->mosq, 1, 10, true);        /* 1, 2, 4, 8, 10 s */
     /* report runs under mlockall(MCL_FUTURE): give the network thread a small
      * stack instead of the 8 MB default, which would all be locked in RAM */
     if (pthread_getattr_default_np(&attr) == 0) {
