@@ -113,10 +113,20 @@ One overlay for the whole board (replaces the stock UART overlays): pin-mux for 
 | Kernel / systemd | OMAP hardware watchdog (`watchdog1`) serviced by systemd, 30 s |
 | Wi-Fi | [`systemd/wifi-check.sh`](systemd/wifi-check.sh) every 30 s: fixes the wl18xx boot bug on the RT kernel immediately, pings the router, restarts `iwd`, reboots after 5 min of failure (at most once per 6 h) |
 | Sensors | absent → simulated (development only), lost after working → fault flag, re-probed every 5 s (hot-plug) |
-| Display / input | opened with retry (udev applies permissions a few seconds after boot) |
+| Display / input | opened with retry (udev applies permissions a few seconds after boot); OLED blanked on every stop, crash included (`report` blanks it first, then [`tools/oled_off`](tools/oled_off.c) from `ExecStopPost`) |
+| Power button | one tap = clean shutdown with full power-off, one tap = power on. Needs the RTC alarm to drive `PMIC_POWER_EN`; this board's 32 kHz crystal is dead, so [`systemd/rtc-int32k.service`](systemd/rtc-int32k.service) moves the RTC to the internal 32 kHz clock at boot |
 
 ### Boot-time optimisation
 `systemd-analyze` showed services this device does not need competing for the single core: `bb-usb-gadgets` (17 s), nginx + Cockpit, an on-board Mosquitto, Bluetooth, `gpio-manager`. Disabling them: **59.2 s → 47.2 s**.
+
+What the user sees is **first live data on the OLED**, measured from kernel start with `journalctl -o short-monotonic`: **55.6 s → ~25 s** (≈73 s → ≈43 s from pressing POWER).
+
+| Step | Saved |
+|---|---|
+| udev applies device permissions late (~55 s) on this single-core board, so the OLED waited on `Permission denied`. [`scripts/aqm_devperm.sh`](scripts/aqm_devperm.sh) (`ExecStartPre=+`) sets the same groups and modes for I2C, input, both UARTs and the LED | ~10 s |
+| `report` draws the first live sample, then loads 24 h of history from SQLite (before `READY=1`, so the watchdog is unaffected) | ~2–3 s |
+| `aqm.service` uses `DefaultDependencies=no` and starts right after the rootfs, journald, mqueue and `time-set.target`, not after `/boot/firmware` and all of `sysinit` | ~8 s |
+| `quiet` kernel console (115200-baud printing slowed the kernel), unused HDMI/audio/ADC/PRU overlays dropped: kernel 16.0 → 12.2 s | ~4 s | Masking `bluetooth.service` alone still left the kernel uploading firmware to the WL1835's Bluetooth core at every boot, so [`config/aqm-no-bluetooth.conf`](config/aqm-no-bluetooth.conf) also blocks the `hci_uart` and `bluetooth` modules.
 
 ---
 
@@ -172,7 +182,7 @@ MQTT is optional at build time (compiled out without `libmosquitto-dev`). Config
 Unit tests for the rings, shared memory, AQI, SQLite store, orientation, SSD1306 rendering, PMS5003 parser (real captured frames), button events, averages, JSON, Modbus — and the **ENS160/AHT21 drivers against simulated chips**: the test links with `--wrap=read,write,ioctl,__ioctl_time64` so the drivers' real init and read sequences run without hardware (`__ioctl_time64` because 32-bit Debian 13 uses 64-bit `time_t` and glibc renames `ioctl`). `aqm_sense_fakei2c` runs the real `sense` binary against chips that can be plugged and unplugged at run time.
 
 ### Tools
-`pms_read` (live PMS5003 frames) · `accel_view`, `accel_cal`, `autorotate` (ADXL345) · `oled_anim`, `gif2oled.py` (display) · `pi_demo` (priority inversion) · `mb_master.py` (Modbus master) · `mkfont.py` (bitmap fonts from X11 misc-fixed).
+`pms_read` (live PMS5003 frames) · `accel_view`, `accel_cal`, `autorotate` (ADXL345) · `oled_anim`, `gif2oled.py`, `oled_off` (display) · `pi_demo` (priority inversion) · `mb_master.py` (Modbus master) · `mkfont.py` (bitmap fonts from X11 misc-fixed).
 
 ---
 
@@ -184,6 +194,7 @@ Unit tests for the rings, shared memory, AQI, SQLite store, orientation, SSD1306
 - **Test on the target architecture.** The I2C driver test passed on x86-64 and failed on the board (`ioctl` → `__ioctl_time64` on armhf); reproduced under `qemu-arm`.
 - **A sensor fault must never look like clean air** — every output path (OLED, log, JSON, Modbus) distinguishes "no data" from 0.
 - **Read the hardware, don't assume it.** The HW-519's TXD/RXD labels are straight-through, its input has an LED pull-up (a 10 kΩ series resistor was too weak), and its MAX485 must run at 3.3 V on a 3.3 V SoC — all found by measuring.
+- **Follow a fault down to the register.** `poweroff` ended in a kernel panic with the board still powered. The device tree was correct and the TPS65217 was armed (STATUS `0x80`). But `/sys/class/rtc/rtc0/since_epoch` never changed, and reading the RTC registers through `/dev/mem` showed it set to run from the external crystal yet never running (`STATUS=00`). With a dead 32 kHz crystal the RTC alarm that drives `PMIC_POWER_EN` never fires. Switching the RTC to the internal 32 kHz clock fixed it in software.
 
 ## Status
 Complete except final hardware validation of the ENS160/AHT21 module (drivers written and tested against simulated chips; the module is in transit). Until it is connected, `sense` reports TVOC / eCO2 / T / RH from a simulator and logs that it does so.
