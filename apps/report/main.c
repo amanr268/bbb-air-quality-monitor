@@ -393,7 +393,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    seed_averages();
+    /* history is loaded after the first live sample is on the OLED (below) */
     g_mqtt = aqm_mqtt_start(getenv("AQM_MQTT") ? getenv("AQM_MQTT") : "config/mqtt.conf");
     g_modbus = aqm_modbus_start(getenv("AQM_MODBUS") ? getenv("AQM_MODBUS") : "config/modbus.conf");
     display_init(&disp);
@@ -428,8 +428,17 @@ int main(int argc, char **argv)
             }
             /* a sample reaching the last stage proves all 5 stages are alive:
              * pet the systemd watchdog and publish a one-line status */
-            if (!disp.have_sample)
+            if (!disp.have_sample) {
+                /* boot: put live data on the OLED first, then load the 24 h
+                 * history (slow on a cold SD card). Before READY=1, so the
+                 * systemd watchdog is not running yet. */
+                disp.last = s;
+                disp.have_sample = 1;
+                disp.dirty = 1;
+                display_tick(&disp);
+                seed_averages();
                 aqm_notify("READY=1");
+            }
             {
                 char st[96];
                 if (s.status & AQM_ST_PMS_FAULT)
