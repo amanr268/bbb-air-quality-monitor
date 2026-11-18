@@ -1,0 +1,3 @@
+# read-only access to the monitor topics
+user phone
+topic read aqm/#

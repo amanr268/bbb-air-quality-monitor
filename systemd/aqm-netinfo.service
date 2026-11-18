@@ -1,0 +1,14 @@
+[Unit]
+Description=AQM: publish board Wi-Fi/system info for the phone app (MQTT aqm/bbb-aqi/net)
+After=mosquitto.service network-online.target
+Wants=mosquitto.service
+
+[Service]
+User=aman
+ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_netinfo.sh
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
