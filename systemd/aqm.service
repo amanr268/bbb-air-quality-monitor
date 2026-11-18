@@ -3,7 +3,12 @@
 #           sudo systemctl daemon-reload && sudo systemctl enable --now aqm
 [Unit]
 Description=BBB air-quality monitor (sense/capture/convert/compare/report)
-After=local-fs.target
+# start early: needs only /, journald, mqueue and a restored clock (not /boot/firmware)
+DefaultDependencies=no
+After=-.mount systemd-remount-fs.service systemd-journald.socket dev-mqueue.mount time-set.target
+Wants=time-set.target
+Conflicts=shutdown.target
+Before=shutdown.target
 # 5 failed starts within 10 min = something is badly wrong: reboot the board
 StartLimitIntervalSec=600
 StartLimitBurst=5
@@ -16,7 +21,7 @@ NotifyAccess=all
 User=aman
 WorkingDirectory=/home/aman/bbb-air-quality-monitor
 # udev applies device permissions late at boot (~55 s): set them now (same as its rules)
-ExecStartPre=-+/bin/sh -c 'chgrp gpio /dev/i2c-2 && chmod 0660 /dev/i2c-2; chgrp input /dev/input/event* && chmod 0660 /dev/input/event*'
+ExecStartPre=-+/home/aman/bbb-air-quality-monitor/scripts/aqm_devperm.sh
 ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_service.sh
 ExecStopPost=/bin/rm -f /dev/shm/aqm_shm /dev/mqueue/aqm_alarm
 # blank the OLED whatever way the service ended (clean stop, crash, kill)
