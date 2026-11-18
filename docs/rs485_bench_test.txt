@@ -1,0 +1,18 @@
+RS485 / Modbus RTU test with ONE transceiver (HW-519: MAX485 + 74HC14 auto-direction)
+
+HW-519 -> BeagleBone (final design)
+  VCC -> P9.3 (3.3 V; at 5 V the MAX485 outputs would be 5 V into the AM335x)
+  GND -> P9.1
+  TXD <- P9.13 (UART4 TX), plain wire     labels are straight-through: MCU TX -> TXD
+  RXD -> 1k -> P9.11 (UART4 RX)
+  (a 10k in the TX line was too weak: the module input has an LED + pull-up to VCC)
+HW-519 measured: A+ 4.6k pull-up, B- 4.3k pull-down, no 120R termination.
+
+Modbus master without a 2nd transceiver: CP2102 (3.3 V USB-UART) tapped onto the bus
+  CP2102 TX -> 1k -> A+ ; CP2102 RX -> A+ ; B- -> 1k -> 3.3 V ; common GND
+  receiver sees A-B = +0.63 V (1) / -2.08 V (0), threshold +-0.2 V.
+  The request echoes back on A+; tools/mb_master.py drops it and reads until the
+  full reply length (the slave waits t3.5 before answering).
+
+Result: python3 tools/mb_master.py /dev/cu.usbserial-XXXX --loop
+  FC04 regs 0..24, valid CRC every poll, 85-89 ms per poll at 9600 8N2.

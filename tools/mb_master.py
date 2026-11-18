@@ -5,8 +5,10 @@ No extra packages needed (plain termios), runs on macOS and Linux.
 
   python3 tools/mb_master.py /dev/cu.usbserial-XXXX [--baud 9600] [--id 1] [--loop]
 
-Wiring: USB-RS485 adapter A/B to the board's RS485 module A/B, or for a quick
-TTL test a 3.3 V USB-UART straight to UART4 (adapter TX -> P9.11, RX -> P9.13, GND).
+Wiring: USB-RS485 adapter A/B to the board's RS485 module A/B; or a 3.3 V USB-UART
+straight to UART4 (adapter TX -> P9.11, RX -> P9.13, GND); or the bench tap onto
+the HW-519's A/B (TX -> 1k -> A, RX -> A, B -> 10k -> 3.3 V, GND) - the echo of
+the request that the tap produces is removed automatically.
 """
 import argparse, os, select, struct, termios, time
 
@@ -45,17 +47,23 @@ def open_port(dev, baud):
     return fd
 
 
-def read_regs(fd, sid, start, qty, timeout=0.5):
+def read_regs(fd, sid, start, qty, timeout=1.0):
     req = bytes([sid, 4]) + struct.pack(">HH", start, qty)
     req += struct.pack("<H", crc16(req))
+    termios.tcflush(fd, termios.TCIFLUSH)        # drop anything left from earlier polls
     os.write(fd, req)
+    want = 3 + 2 * qty + 2                        # normal reply length
     out, t0 = b"", time.time()
     while time.time() - t0 < timeout:
         r, _, _ = select.select([fd], [], [], 0.02)
         if r:
             out += os.read(fd, 256)
-        elif out:
-            break
+        # two-wire RS485 bench tap (A line wired to both TX and RX): our own
+        # request is echoed back first - drop it
+        body = out[len(req):] if out.startswith(req) else out
+        if len(body) >= want or (len(body) >= 5 and body[1] & 0x80):
+            break                                 # complete reply (or exception)
+    out = out[len(req):] if out.startswith(req) else out
     if len(out) < 5 or crc16(out[:-2]) != struct.unpack("<H", out[-2:])[0]:
         raise IOError(f"no/invalid reply ({out.hex(' ') or 'nothing'})")
     if out[1] & 0x80:
