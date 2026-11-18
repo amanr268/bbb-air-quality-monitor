@@ -1,0 +1,11 @@
+[Unit]
+Description=Run RTC from the internal 32 kHz clock (dead Y2 crystal), needed for PMIC power-off
+ConditionPathExists=/dev/rtc0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/aman/bbb-air-quality-monitor/scripts/rtc_int32k.py
+
+[Install]
+WantedBy=multi-user.target
