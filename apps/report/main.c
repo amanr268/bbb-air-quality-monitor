@@ -460,9 +460,11 @@ int main(int argc, char **argv)
 
     aqm_log("report", "stopping");
     aqm_notify("STOPPING=1");
+    /* blank the OLED and switch the LED off FIRST: if anything below hangs and
+     * systemd has to kill us, the panel must not keep showing stale data */
+    display_close(&disp);
     aqm_mqtt_stop(g_mqtt);
     aqm_modbus_stop(g_modbus);
-    display_close(&disp);
     mq_close(q);
     aqm_alarm_unlink();
     aqm_shm_detach(shm);

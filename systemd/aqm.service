@@ -17,6 +17,8 @@ User=aman
 WorkingDirectory=/home/aman/bbb-air-quality-monitor
 ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_service.sh
 ExecStopPost=/bin/rm -f /dev/shm/aqm_shm /dev/mqueue/aqm_alarm
+# blank the OLED whatever way the service ended (clean stop, crash, kill)
+ExecStopPost=-/home/aman/bbb-air-quality-monitor/build/tools/oled_off
 # no sample through all 5 stages for 5 s -> kill and restart
 WatchdogSec=5
 TimeoutStartSec=30

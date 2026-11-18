@@ -177,7 +177,9 @@ void aqm_mqtt_stop(aqm_mqtt_t *m)
         usleep(100000);                         /* let the thread send it */
     }
     mosquitto_disconnect(m->mosq);
-    mosquitto_loop_stop(m->mosq, false);
+    /* force: during system shutdown the network may already be gone and a
+     * graceful join could block until systemd kills the process */
+    mosquitto_loop_stop(m->mosq, true);
     mosquitto_destroy(m->mosq);
     mosquitto_lib_cleanup();
     if (m->dropped)
