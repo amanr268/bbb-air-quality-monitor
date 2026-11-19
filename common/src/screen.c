@@ -3,6 +3,7 @@
 #include "aqm/aqi.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 /* portrait is 10 characters wide: short category names */
@@ -19,7 +20,10 @@ static void hhmm(int64_t t, char *buf, size_t n)
     struct tm tm;
 
     localtime_r(&tt, &tm);
-    strftime(buf, n, "%H:%M", &tm);
+    /* 12-hour clock: "4:05 PM" (drop the leading zero of %I) */
+    strftime(buf, n, "%I:%M %p", &tm);
+    if (buf[0] == '0')
+        memmove(buf, buf + 1, strlen(buf));
 }
 
 static void centre(ssd1306_t *d, int y, const char *s, const aqm_font_t *f)
@@ -27,99 +31,122 @@ static void centre(ssd1306_t *d, int y, const char *s, const aqm_font_t *f)
     ssd1306_text(d, (ssd1306_width(d) - ssd1306_text_width(s, f)) / 2, y, s, f);
 }
 
-/* inverted bar across the top line with the alert text */
-static void draw_banner(ssd1306_t *d, const aqm_banner_t *b, const aqm_font_t *f)
+/* alert wording for the header (21 characters landscape, 10 portrait) */
+static void banner_text(const aqm_banner_t *b, int portrait, char *buf, size_t n)
 {
-    int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
-    char buf[24];
-
     switch (b->kind) {
     case AQM_BANNER_AQI:
         if (portrait)
-            snprintf(buf, sizeof(buf), "!%s", short_cat(b->aqi_cat));
+            snprintf(buf, n, "!%s", short_cat(b->aqi_cat));
         else
-            snprintf(buf, sizeof(buf), "! AQI %s", aqm_aqi_cat_name((aqm_aqi_cat_t)b->aqi_cat));
+            snprintf(buf, n, "! %s", aqm_aqi_cat_name((aqm_aqi_cat_t)b->aqi_cat));
         break;
     case AQM_BANNER_FAULT:
-        snprintf(buf, sizeof(buf), portrait ? "! FAULT" : "! SENSOR FAULT");
+        snprintf(buf, n, portrait ? "! FAULT" : "! SENSOR FAULT");
         break;
     case AQM_BANNER_TVOC:
-        snprintf(buf, sizeof(buf), portrait ? "! TVOC HI" : "! TVOC HIGH");
+        snprintf(buf, n, portrait ? "! TVOC HI" : "! TVOC HIGH");
         break;
     default:
-        snprintf(buf, sizeof(buf), "! ALARM");
+        snprintf(buf, n, "! ALARM");
         break;
     }
-    ssd1306_rect(d, 0, 0, w, f->h, 1);
-    ssd1306_text_color(d, (w - ssd1306_text_width(buf, f)) / 2, 0, buf, f, 0);
 }
 
+/* text centred in [x0, x0 + w); on = 0 draws dark text on a lit area */
+static void centre_in(ssd1306_t *d, int x0, int w, int y, const char *s,
+                      const aqm_font_t *f, int on)
+{
+    ssd1306_text_color(d, x0 + (w - ssd1306_text_width(s, f)) / 2, y, s, f, on);
+}
+
+/* one grid cell: label on top, value below, both centred */
+static void tile(ssd1306_t *d, int x, int y, int w, const char *label, const char *val,
+                 const aqm_font_t *f)
+{
+    centre_in(d, x, w, y, label, f, 1);
+    centre_in(d, x, w, y + 11, val, f, 1);
+}
+
+/*
+ * Main page: AQI in an inverted (lit) header, then a grid of tiles separated
+ * by lines - landscape 3 x 2, portrait 2 x 3. An active alert replaces the
+ * category text in the header. A faulty sensor shows "--", never 0.
+ */
 void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *banner)
 {
     const aqm_font_t *sm = &font_6_10, *big = &font_10_20;
-    int w = ssd1306_width(d);
-    char t[8], aqi[8], buf[32], pm25[8], pm10[8], tv[8], tc[8], rh[8];
+    int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
+    char t[12], aqi[8], cat[24], pm25[8], pm10[8], tv[8], co2[8], tc[8], rh[8];
     /* a missing sensor must never look like clean air (or -50 C) */
     int pm_ok = !(s->status & AQM_ST_PMS_FAULT);
     int ens_ok = !(s->status & AQM_ST_ENS_FAULT);
     int aht_ok = !(s->status & AQM_ST_AHT_FAULT);
 
-    if (banner && banner->kind == AQM_BANNER_NONE)
-        banner = NULL;
     ssd1306_clear(d);
     hhmm(s->t_wall_s, t, sizeof(t));
     if (pm_ok) {
         snprintf(aqi, sizeof(aqi), "%u", s->aqi);
-        snprintf(pm25, sizeof(pm25), "%3.0f", s->pm25_cal);
-        snprintf(pm10, sizeof(pm10), "%3.0f", s->pm10_cal);
+        snprintf(pm25, sizeof(pm25), "%.0f", s->pm25_cal);
+        snprintf(pm10, sizeof(pm10), "%.0f", s->pm10_cal);
+        snprintf(cat, sizeof(cat), "%s", portrait ? short_cat(s->aqi_cat)
+                 : aqm_aqi_cat_name((aqm_aqi_cat_t)s->aqi_cat));
     } else {
         snprintf(aqi, sizeof(aqi), "--");
-        snprintf(pm25, sizeof(pm25), " --");
-        snprintf(pm10, sizeof(pm10), " --");
+        snprintf(pm25, sizeof(pm25), "--");
+        snprintf(pm10, sizeof(pm10), "--");
+        snprintf(cat, sizeof(cat), "%s", portrait ? "No PM" : "No PM data");
     }
-
-    if (ens_ok) snprintf(tv, sizeof(tv), "%3u", s->tvoc_ppb);
-    else        snprintf(tv, sizeof(tv), " --");
+    if (banner && banner->kind != AQM_BANNER_NONE)
+        banner_text(banner, portrait, cat, sizeof(cat));
+    if (ens_ok) snprintf(tv, sizeof(tv), "%u", s->tvoc_ppb);
+    else        snprintf(tv, sizeof(tv), "--");
+    if (ens_ok && s->eco2_ppm) snprintf(co2, sizeof(co2), "%u", (unsigned)s->eco2_ppm);
+    else                       snprintf(co2, sizeof(co2), "--");
     if (aht_ok) {
-        snprintf(tc, sizeof(tc), "%4.1fC", s->temp_c);
-        snprintf(rh, sizeof(rh), "%2.0f%%", s->rh_pct);
+        /* portrait tiles are 5 characters wide: no unit */
+        snprintf(tc, sizeof(tc), portrait ? "%.1f" : "%.1fC", s->temp_c);
+        snprintf(rh, sizeof(rh), "%.0f%%", s->rh_pct);
     } else {
-        snprintf(tc, sizeof(tc), "  --C");
-        snprintf(rh, sizeof(rh), "--%%");
+        snprintf(tc, sizeof(tc), "--");
+        snprintf(rh, sizeof(rh), "--");
     }
 
-    if (w > ssd1306_height(d)) {
-        /* landscape 128 x 64 */
-        if (banner) {
-            draw_banner(d, banner, sm);
-        } else {
-            ssd1306_text(d, 0, 0, "AQI", sm);
-            ssd1306_text(d, w - ssd1306_text_width(t, sm), 0, t, sm);
-        }
-        ssd1306_text(d, 0, 11, aqi, big);
-        ssd1306_text(d, ssd1306_text_width(aqi, big) + 6, 17,
-                     pm_ok ? aqm_aqi_cat_name((aqm_aqi_cat_t)s->aqi_cat) : "No PM data", sm);
-        ssd1306_line(d, 0, 33, w - 1, 33);
-        snprintf(buf, sizeof(buf), "PM2.5 %s PM10 %s", pm25, pm10);
-        ssd1306_text(d, 0, 37, buf, sm);
-        snprintf(buf, sizeof(buf), "TVOC %s  %s %s", tv, tc, rh);
-        ssd1306_text(d, 0, 51, buf, sm);
+    if (!portrait) {
+        /* landscape 128 x 64: header 21 px, two rows of 3 tiles */
+        int x = 2 + ssd1306_text_width(aqi, big) + 5;
+
+        ssd1306_rect(d, 0, 0, w, 21, 1);
+        ssd1306_text_color(d, 2, 1, aqi, big, 0);
+        ssd1306_text_color(d, x, 1, "AQI", sm, 0);
+        ssd1306_text_color(d, w - 1 - ssd1306_text_width(t, sm), 1, t, sm, 0);
+        ssd1306_text_color(d, x, 11, cat, sm, 0);
+        ssd1306_line(d, 42, 22, 42, 63);
+        ssd1306_line(d, 85, 22, 85, 63);
+        ssd1306_line(d, 0, 43, w - 1, 43);
+        tile(d, 0, 22, 42, "PM2.5", pm25, sm);
+        tile(d, 43, 22, 42, "PM10", pm10, sm);
+        tile(d, 86, 22, 42, "TVOC", tv, sm);
+        tile(d, 0, 44, 42, "eCO2", co2, sm);
+        tile(d, 43, 44, 42, "Temp", tc, sm);
+        tile(d, 86, 44, 42, "RH", rh, sm);
     } else {
-        /* portrait 64 x 128 */
-        if (banner)
-            draw_banner(d, banner, sm);
-        else
-            centre(d, 0, "AQI", sm);
-        centre(d, 12, aqi, big);
-        centre(d, 34, pm_ok ? short_cat(s->aqi_cat) : "No PM", sm);
-        ssd1306_line(d, 0, 46, w - 1, 46);
-        snprintf(buf, sizeof(buf), "PM2.5 %s", pm25);  ssd1306_text(d, 0, 50, buf, sm);
-        snprintf(buf, sizeof(buf), "PM10  %s", pm10);  ssd1306_text(d, 0, 61, buf, sm);
-        snprintf(buf, sizeof(buf), "TVOC  %s", tv);  ssd1306_text(d, 0, 72, buf, sm);
-        snprintf(buf, sizeof(buf), "T  %s", tc);     ssd1306_text(d, 0, 83, buf, sm);
-        snprintf(buf, sizeof(buf), "RH    %s", rh);  ssd1306_text(d, 0, 94, buf, sm);
-        ssd1306_line(d, 0, 107, w - 1, 107);
-        centre(d, 112, t, sm);
+        /* portrait 64 x 128: header 46 px, three rows of 2 tiles, clock */
+        ssd1306_rect(d, 0, 0, w, 46, 1);
+        centre_in(d, 0, w, 1, "AQI", sm, 0);
+        centre_in(d, 0, w, 12, aqi, big, 0);
+        centre_in(d, 0, w, 34, cat, sm, 0);
+        ssd1306_line(d, 31, 47, 31, 115);
+        ssd1306_line(d, 0, 70, w - 1, 70);
+        ssd1306_line(d, 0, 93, w - 1, 93);
+        ssd1306_line(d, 0, 116, w - 1, 116);
+        tile(d, 0, 48, 31, "PM2.5", pm25, sm);
+        tile(d, 32, 48, 32, "PM10", pm10, sm);
+        tile(d, 0, 71, 31, "TVOC", tv, sm);
+        tile(d, 32, 71, 32, "eCO2", co2, sm);
+        tile(d, 0, 94, 31, "Temp", tc, sm);
+        tile(d, 32, 94, 32, "RH", rh, sm);
+        centre_in(d, 0, w, 118, t, sm, 1);
     }
 }
 
