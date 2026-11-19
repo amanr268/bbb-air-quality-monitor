@@ -41,6 +41,8 @@
 #define BUTTON_NAME     "aqm-keys"    /* gpio-keys node in the DT overlay        */
 #define LED_NAME        "aqm:alarm"   /* gpio-leds node in the DT overlay        */
 #define PAGE_MS         30000         /* info page falls back to main after this */
+#define MULTI_GAP_MS    450           /* presses closer than this belong together */
+#define OFF_PRESSES     3             /* this many quick presses = screen off     */
 
 /* rolling 1/5/10/20 min + 24 h averages of the samples this stage receives */
 static aqm_avg_t g_avg;
@@ -69,6 +71,9 @@ typedef struct {
     int64_t      io_retry_ns;
     int          led_on;              /* current LED state                       */
     unsigned     tick;                /* 10 Hz tick counter (LED blink phase)    */
+    int          screen_off;          /* OLED blanked by a triple press          */
+    int          presses;             /* presses not yet acted on                */
+    int64_t      press_ns;            /* time of the last of them                */
 } display_t;
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
@@ -235,6 +240,22 @@ static void led_tick(display_t *dp)
 }
 
 /* short press: next page; info pages time out back to the main page */
+/* panel off (0xAE, ~10 uA) / on (0xAF); everything else keeps running */
+static void screen_power(display_t *dp, int on)
+{
+    uint8_t cmd = on ? 0xAF : 0xAE;
+
+    dp->screen_off = !on;
+    if (dp->have_lcd)
+        ssd1306_cmd(&dp->lcd, &cmd, 1);
+    if (on) {
+        dp->page = AQM_PAGE_MAIN;
+        dp->lcd.shadow_valid = 0;          /* full redraw */
+        dp->dirty = 1;
+    }
+    aqm_log("report", "OLED %s by button", on ? "on" : "off");
+}
+
 static void button_tick(display_t *dp)
 {
     int n;
@@ -248,10 +269,26 @@ static void button_tick(display_t *dp)
         dp->btn_fd = -1;
         return;
     }
-    if (n > 0 && dp->have_lcd) {
-        dp->page = (dp->page + n) % AQM_PAGE_COUNT;
-        dp->page_until_ns = mono_ns() + (int64_t)PAGE_MS * 1000000LL;
-        dp->dirty = 1;
+    /* single press = next page, but only once no further press follows
+     * within MULTI_GAP_MS, so a triple press does not flip pages first.
+     * Triple press = OLED off; any press while off = OLED back on. */
+    if (n > 0) {
+        dp->presses += n;
+        dp->press_ns = mono_ns();
+    }
+    if (dp->presses >= OFF_PRESSES && !dp->screen_off) {
+        dp->presses = 0;
+        screen_power(dp, 0);
+    } else if (dp->presses > 0 &&
+               mono_ns() - dp->press_ns >= (int64_t)MULTI_GAP_MS * 1000000LL) {
+        if (dp->screen_off) {
+            screen_power(dp, 1);
+        } else if (dp->have_lcd) {
+            dp->page = (dp->page + dp->presses) % AQM_PAGE_COUNT;
+            dp->page_until_ns = mono_ns() + (int64_t)PAGE_MS * 1000000LL;
+            dp->dirty = 1;
+        }
+        dp->presses = 0;
     }
     if (dp->page != AQM_PAGE_MAIN && mono_ns() >= dp->page_until_ns) {
         dp->page = AQM_PAGE_MAIN;
@@ -276,6 +313,10 @@ static void display_tick(display_t *dp)
         display_open(dp);
         if (!dp->have_lcd)
             return;
+        if (dp->screen_off) {              /* re-opened panel stays dark */
+            uint8_t off = 0xAE;
+            ssd1306_cmd(&dp->lcd, &off, 1);
+        }
     }
 
     if (dp->have_acc && adxl345_read_g(&dp->acc, &gx, &gy, &gz) == 0 &&
@@ -290,7 +331,7 @@ static void display_tick(display_t *dp)
         dp->dirty = 1;
     }
 
-    if (dp->dirty && dp->have_sample) {
+    if (dp->dirty && dp->have_sample && !dp->screen_off) {
         if (dp->page == AQM_PAGE_MAIN) {
             aqm_screen_draw(&dp->lcd, &dp->last, &dp->banner);
         } else {
