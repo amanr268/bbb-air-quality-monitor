@@ -3,7 +3,8 @@
  * without hardware. Link with -Wl,--wrap=read,--wrap=write,--wrap=ioctl and
  * run with -I /dev/null. Which chips are "plugged in" is read from the file
  * named by $FAKE_I2C (words "ens" and/or "aht"), so they can be plugged and
- * unplugged while the program runs.
+ * unplugged while the program runs. The word "stall" makes the ENS160 stop
+ * producing data while still answering (a fault seen on real hardware).
  */
 #include "aqm/aht21.h"
 
@@ -122,6 +123,8 @@ ssize_t __wrap_read(int fd, void *buf, size_t n)
             int validity = ens_reads < 4 ? 1 : 0;     /* 4 s "warm-up", then valid */
             ens_reads++;
             b[0] = (uint8_t)((ens_opmode == 0x02 ? 0x82 : 0) | (validity << 2));
+            if (present("stall"))
+                b[0] = 0x01;            /* field fault: not running, no new data */
         } else if (ens_ptr == 0x21) {                 /* UBA 2, 212 ppb, 690 ppm */
             uint8_t d[5] = { 2, 212, 0, 0xB2, 0x02 };
             memcpy(b, d, n < 5 ? n : 5);

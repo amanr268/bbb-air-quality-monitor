@@ -147,6 +147,10 @@ static void pms_apply(aqm_sample_t *s, int64_t now)
 #define I2C_FAIL_MAX    3                      /* consecutive misses = fault */
 #define I2C_REOPEN      10                     /* bus errors before re-probe */
 #define ENS_STALE_NS    (3LL * 1000000000LL)
+/* the ENS160 can stop measuring while still answering on the bus (seen in the
+ * field: STATUS 0x01, OPMODE still 0x02, no new data). No bus errors follow,
+ * so the "gone" path never fires: restart it after this long without data. */
+#define ENS_STALL_NS    (10LL * 1000000000LL)
 
 static const char *i2c_dev = "/dev/i2c-2";
 static aht21_t     aht = { .fd = -1 };
@@ -279,6 +283,8 @@ static void ens_apply(aqm_sample_t *s, int64_t now)
 
     memset(&d, 0, sizeof(d));
     rc = ens160_read(&ens, &d);
+    if (rc == 1 && d.aqi_uba == 0)
+        rc = 0;                     /* UBA is 1..5: an all-zero frame is not data */
     if (rc == 1) {
         ens_last = d;
         ens_data_ns = now;
@@ -311,6 +317,18 @@ static void ens_apply(aqm_sample_t *s, int64_t now)
         ens160_close(&ens);
         have_ens = 0;
         ens_last_rc = 1;
+    } else {
+        int64_t since = ens_data_ns > ens_ready_ns ? ens_data_ns : ens_ready_ns;
+
+        if (now - since > ENS_STALL_NS) {
+            aqm_log("sense", "ENS160 stalled (no new data for %lld s, status 0x%02x): "
+                    "resetting it", (long long)((now - since) / 1000000000LL),
+                    ens.last_status);
+            ens160_close(&ens);
+            have_ens = 0;
+            ens_last_rc = 1;
+            i2c_retry_ns = 0;       /* re-open (reset + standard mode) on the next tick */
+        }
     }
 }
 
