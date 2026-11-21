@@ -1,11 +1,13 @@
 #!/bin/bash
 # AQM board self-test: prints PASS / WARN / FAIL for each subsystem.
 # Run on the board:  bash scripts/aqm_selftest.sh   (asks for sudo once)
+# Also runs daily from aqm-selftest.timer: journalctl -u aqm-selftest -n 70
 P=0; W=0; F=0
-pass() { printf '  \e[32mPASS\e[0m  %s\n' "$*"; P=$((P+1)); }
-warn() { printf '  \e[33mWARN\e[0m  %s\n' "$*"; W=$((W+1)); }
-fail() { printf '  \e[31mFAIL\e[0m  %s\n' "$*"; F=$((F+1)); }
-hdr()  { printf '\n\e[1m== %s\e[0m\n' "$*"; }
+if [ -t 1 ]; then G='\e[32m' Y='\e[33m' R='\e[31m' B='\e[1m' N='\e[0m'; else G= Y= R= B= N=; fi
+pass() { printf "  ${G}PASS${N}  %s\n" "$*"; P=$((P+1)); }
+warn() { printf "  ${Y}WARN${N}  %s\n" "$*"; W=$((W+1)); }
+fail() { printf "  ${R}FAIL${N}  %s\n" "$*"; F=$((F+1)); }
+hdr()  { printf "\n${B}== %s${N}\n" "$*"; }
 sudo -v || exit 1
 
 hdr "System"
@@ -57,6 +59,10 @@ if [ -n "$ens" ]; then
     grep -q 'valid' <<<"$ens" && pass "ENS160 ${ens##*ENS160: }" || warn "ENS160 not 'valid' yet (warm-up ~3 min): ${ens##*ENS160: }"
 else fail "no ENS160 log in the last 60 s"; fi
 grep -qi 'simulated' <<<"$j" && warn "a sensor reports SIMULATED data" || pass "no simulated sensor data"
+st=$(journalctl -u aqm --since "-24 h" --no-pager -q -o cat | grep -c 'ENS160 stalled')
+if [ "$st" -eq 0 ]; then pass "ENS160: no stalls in the last 24 h"
+elif [ "$st" -le 5 ]; then warn "ENS160 stalled $st times in 24 h (each auto-reset; a 10 uF cap at the module would help)"
+else fail "ENS160 stalled $st times in 24 h: check its 3.3 V supply / wiring"; fi
 s=$(grep 'report   seq' <<<"$j" | tail -1)
 [ -n "$s" ] && pass "pipeline end-to-end: ${s##*report   }" || fail "no samples reached 'report' in the last 60 s"
 

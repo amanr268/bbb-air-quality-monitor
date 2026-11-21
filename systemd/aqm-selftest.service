@@ -1,0 +1,8 @@
+[Unit]
+Description=AQM daily self-test (results: journalctl -u aqm-selftest -n 70)
+After=aqm.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aman/bbb-air-quality-monitor
+ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_selftest.sh
