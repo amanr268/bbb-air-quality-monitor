@@ -1,8 +1,8 @@
 # BeagleBone Black Wireless — Real-Time Air-Quality Monitor
 
-A multi-process, real-time air-quality monitor built on a BeagleBone Black Wireless (TI AM335x, 1 GHz Cortex-A8, 512 MB), covering the whole stack: **custom U-Boot → PREEMPT_RT kernel → own device-tree overlay → user-space drivers → a 5-stage real-time pipeline with IPC → display, MQTT and Modbus RTU over RS485**.
+A multi-process, real-time air-quality monitor built on a BeagleBone Black Wireless (TI AM335x, 1 GHz Cortex-A8, 512 MB), covering the whole stack: **custom U-Boot → PREEMPT_RT kernel → own device-tree overlay → user-space drivers → a 5-stage real-time pipeline with IPC → display, MQTT (with an Android app) and Modbus RTU over RS485**.
 
-It measures PM1.0 / PM2.5 / PM10, TVOC, eCO2, temperature and humidity once per second, computes the Indian CPCB AQI, keeps a 48 h offline buffer, and reports locally (OLED, LED, button) and remotely (MQTT, Modbus RTU).
+It measures PM1.0 / PM2.5 / PM10, TVOC, eCO2, temperature and humidity once per second, computes the Indian CPCB AQI, keeps a 48 h offline buffer, and reports locally (OLED, LED, button) and remotely (MQTT, Modbus RTU, and an Android app that also works away from home over Tailscale). A self-test checks the whole board every day and sends the result to the app.
 
 ![status](https://img.shields.io/badge/tests-13%2F13-brightgreen) ![kernel](https://img.shields.io/badge/kernel-6.12.111--rt-blue) ![u-boot](https://img.shields.io/badge/U--Boot-2022.04--aqm-blue)
 
@@ -17,7 +17,8 @@ It measures PM1.0 / PM2.5 / PM10, TVOC, eCO2, temperature and humidity once per 
 | **Pipeline** (sensor → report, 5 processes) | wake-up jitter avg ~150 µs, stage-to-stage IPC ~150–240 µs, end-to-end ~0.4–2 ms |
 | **Boot time** | 59.2 s → **47.2 s** (unused services removed); data on the MQTT broker 26 s after the display (was ~97 s) |
 | **Restart recovery** | 24 h averages rebuilt from SQLite at start-up: 26 700 rows in 369 ms |
-| **Fault handling** | a missing or failed sensor is reported as `--` / `null` / `0xFFFF` — never as 0 or "clean air" |
+| **Fault handling** | a missing or failed sensor is reported as `--` / `null` / `0xFFFF` — never as 0 or "clean air"; a stalled ENS160 is reset automatically within 10 s |
+| **Self-diagnosis** | ~40-check self-test (services, watchdogs, RTC, overlay, I2C scan, sensor error counters, network, MQTT, Modbus) runs daily and after boot; the summary is shown in the phone app |
 | **Modbus RTU over RS485** | 25-register read, valid CRC every poll, 85–89 ms per poll at 9600 baud |
 
 ---
@@ -35,7 +36,7 @@ flowchart LR
     P -. "POSIX mqueue<br/>(alarm priority)" .-> R
     R["report<br/>SCHED_OTHER"] --> OLED[SSD1306 OLED<br/>+ ADXL345 auto-rotate]
     R --> LED[LED + button<br/>gpio-leds / gpio-keys]
-    R --> MQTT[MQTT<br/>Mosquitto broker]
+    R --> MQTT[MQTT<br/>Mosquitto broker on the board] --> APP[Android app + widget<br/>Wi-Fi or Tailscale]
     R --> MB[Modbus RTU slave<br/>UART4 → HW-519 → RS485]
     R --> SD[systemd watchdog<br/>sd_notify]
 ```
@@ -112,7 +113,8 @@ One overlay for the whole board (replaces the stock UART overlays): pin-mux for 
 | Pipeline | `aqm.service` (`Type=notify`): `report` sends `WATCHDOG=1` only when a sample has travelled through **all five stages** → a frozen stage is restarted within 5 s; any stage exit restarts the pipeline; 5 failed starts in 10 min → reboot |
 | Kernel / systemd | OMAP hardware watchdog (`watchdog1`) serviced by systemd, 30 s |
 | Wi-Fi | [`systemd/wifi-check.sh`](systemd/wifi-check.sh) every 30 s: fixes the wl18xx boot bug on the RT kernel immediately, pings the router, restarts `iwd`, reboots after 5 min of failure (at most once per 6 h) |
-| Sensors | absent → simulated (development only), lost after working → fault flag, re-probed every 5 s (hot-plug) |
+| Sensors | absent → simulated (development only), lost after working → fault flag, re-probed every 5 s (hot-plug); an ENS160 that stops producing data while still answering on I2C (seen in the field: STATUS `0x01`) is reset after 10 s, and all-zero frames are rejected |
+| Self-test | [`scripts/aqm_selftest.sh`](scripts/aqm_selftest.sh) from [`aqm-selftest.timer`](systemd/aqm-selftest.timer): daily at 09:13 and 10 min after boot; PASS / WARN / FAIL per check, result retained on MQTT `aqm/bbb-aqi/health` and shown in the app |
 | Display / input | opened with retry (udev applies permissions a few seconds after boot); OLED blanked on every stop, crash included (`report` blanks it first, then [`tools/oled_off`](tools/oled_off.c) from `ExecStopPost`) |
 | Power button | one tap = clean shutdown with full power-off, one tap = power on. Needs the RTC alarm to drive `PMIC_POWER_EN`; this board's 32 kHz crystal is dead, so [`systemd/rtc-int32k.service`](systemd/rtc-int32k.service) moves the RTC to the internal 32 kHz clock at boot |
 
@@ -126,14 +128,16 @@ What the user sees is **first live data on the OLED**, measured from kernel star
 | udev applies device permissions late (~55 s) on this single-core board, so the OLED waited on `Permission denied`. [`scripts/aqm_devperm.sh`](scripts/aqm_devperm.sh) (`ExecStartPre=+`) sets the same groups and modes for I2C, input, both UARTs and the LED | ~10 s |
 | `report` draws the first live sample, then loads 24 h of history from SQLite (before `READY=1`, so the watchdog is unaffected) | ~2–3 s |
 | `aqm.service` uses `DefaultDependencies=no` and starts right after the rootfs, journald, mqueue and `time-set.target`, not after `/boot/firmware` and all of `sysinit` | ~8 s |
-| `quiet` kernel console (115200-baud printing slowed the kernel), unused HDMI/audio/ADC/PRU overlays dropped: kernel 16.0 → 12.2 s | ~4 s | Masking `bluetooth.service` alone still left the kernel uploading firmware to the WL1835's Bluetooth core at every boot, so [`config/aqm-no-bluetooth.conf`](config/aqm-no-bluetooth.conf) also blocks the `hci_uart` and `bluetooth` modules.
+| `quiet` kernel console (115200-baud printing slowed the kernel), unused HDMI/audio/ADC/PRU overlays dropped: kernel 16.0 → 12.2 s | ~4 s |
+
+Masking `bluetooth.service` alone still left the kernel uploading firmware to the WL1835's Bluetooth core at every boot, so [`config/aqm-no-bluetooth.conf`](config/aqm-no-bluetooth.conf) also blocks the `hci_uart` and `bluetooth` modules.
 
 ---
 
 ## Data outputs
 
 ### OLED
-Five pages, cycled with the button: **Air** (AQI, PM, TVOC, T, RH) → **Particles** (incl. 24 h AQI) → **Averages** (1 / 5 / 10 / 20 min, 24 h) → **Climate** → **System** (IP, uptime). Landscape or portrait, chosen from the ADXL345. Alarms show as an inverted banner; the LED blinks at 1 Hz for AQI ≥ 201 and 5 Hz for a PM sensor fault.
+Five pages, cycled with the button: **Air** (inverted header with the AQI, category and a 12-hour clock, then six tiles: PM2.5, PM10, TVOC, eCO₂, temperature, RH) → **Particles** (incl. 24 h AQI) → **Averages** (1 / 5 / 10 / 20 min, 24 h) → **Climate** → **System** (IP, uptime). Landscape or portrait, chosen from the ADXL345. Alarms replace the category in the header; the LED blinks at 1 Hz for AQI ≥ 201 and 5 Hz for a PM sensor fault. Three quick presses turn the OLED off; any press turns it back on.
 
 ### Averages and CPCB AQI
 Rolling means over 1, 5, 10, 20 min (ring of 1 200 one-second samples with running sums) and 24 h (1 440 one-minute slots). Faulty samples are excluded. The **24 h AQI is reported only once 16 h of data exist** (CPCB rule); after a restart it is rebuilt from the SQLite buffer.
@@ -145,8 +149,13 @@ Rolling means over 1, 5, 10, 20 min (ring of 1 200 one-second samples with runni
 | `sample` | 0 | every sample, JSON |
 | `avg` | 1, retained | all windows + 24 h AQI, once a minute |
 | `alarm` | 1 | AQI category changes, sensor faults, TVOC |
+| `net` | 1, retained | board Wi-Fi / system info every 10 s ([`scripts/aqm_netinfo.sh`](scripts/aqm_netinfo.sh)) |
+| `health` | 1, retained | self-test summary: time, PASS/WARN/FAIL counts, every WARN/FAIL line |
 
-libmosquitto with automatic reconnect (1–10 s back-off); the network thread runs on a 256 KiB stack because the process is `mlockall`ed.
+libmosquitto with automatic reconnect (1–10 s back-off); the network thread runs on a 256 KiB stack because the process is `mlockall`ed. The broker runs **on the board** ([`config/mosquitto-aqm.conf`](config/mosquitto-aqm.conf)): an anonymous listener on `127.0.0.1:1884` for the board's own publishers, and a password-protected, read-only listener on port 1883 for the network.
+
+### Android app — [`android/`](android/)
+One-page live view for a phone (laid out for a Galaxy S25+): AQI in the CPCB colour, all readings, dew point and feels-like, averages, sensor health, the last alarm, the board's Wi-Fi details and the **Board health** result of the daily self-test. A home-screen widget shows the essentials (refreshed every 15 min, on tap, and live while the app is open). Plain Java with its own ~200-line MQTT 3.1.1 client — no libraries, no Gradle; built with `aapt` / `dx` / `apksigner` ([`android/build.sh`](android/build.sh)). It tries the home IP first and falls back to the board's **Tailscale** name, so it also works on mobile data.
 
 ### Modbus RTU (RS485) — slave id 1, 9600 8N2, FC 03 / 04
 | Reg | Value | Reg | Value |
@@ -182,7 +191,7 @@ MQTT is optional at build time (compiled out without `libmosquitto-dev`). Config
 Unit tests for the rings, shared memory, AQI, SQLite store, orientation, SSD1306 rendering, PMS5003 parser (real captured frames), button events, averages, JSON, Modbus — and the **ENS160/AHT21 drivers against simulated chips**: the test links with `--wrap=read,write,ioctl,__ioctl_time64` so the drivers' real init and read sequences run without hardware (`__ioctl_time64` because 32-bit Debian 13 uses 64-bit `time_t` and glibc renames `ioctl`). `aqm_sense_fakei2c` runs the real `sense` binary against chips that can be plugged and unplugged at run time.
 
 ### Tools
-`pms_read` (live PMS5003 frames) · `accel_view`, `accel_cal`, `autorotate` (ADXL345) · `oled_anim`, `gif2oled.py`, `oled_off` (display) · `pi_demo` (priority inversion) · `mb_master.py` (Modbus master) · `mkfont.py` (bitmap fonts from X11 misc-fixed).
+`pms_read` (live PMS5003 frames) · `accel_view`, `accel_cal`, `autorotate` (ADXL345) · `oled_anim`, `gif2oled.py`, `oled_off` (display) · `pi_demo` (priority inversion) · `mb_master.py` (Modbus master) · `mkfont.py` (bitmap fonts from X11 misc-fixed) · [`scripts/aqm_selftest.sh`](scripts/aqm_selftest.sh) (board self-test).
 
 ---
 
@@ -195,6 +204,7 @@ Unit tests for the rings, shared memory, AQI, SQLite store, orientation, SSD1306
 - **A sensor fault must never look like clean air** — every output path (OLED, log, JSON, Modbus) distinguishes "no data" from 0.
 - **Read the hardware, don't assume it.** The HW-519's TXD/RXD labels are straight-through, its input has an LED pull-up (a 10 kΩ series resistor was too weak), and its MAX485 must run at 3.3 V on a 3.3 V SoC — all found by measuring.
 - **Follow a fault down to the register.** `poweroff` ended in a kernel panic with the board still powered. The device tree was correct and the TPS65217 was armed (STATUS `0x80`). But `/sys/class/rtc/rtc0/since_epoch` never changed, and reading the RTC registers through `/dev/mem` showed it set to run from the external crystal yet never running (`STATUS=00`). With a dead 32 kHz crystal the RTC alarm that drives `PMIC_POWER_EN` never fires. Switching the RTC to the internal 32 kHz clock fixed it in software.
+- **Watch the data, not only the bus.** After 1–3 h the ENS160 sometimes stopped producing data while still answering on I2C: no bus errors, read counter frozen, OPMODE still `0x02`, DEVICE_STATUS `0x01` (measurement engine stopped). The driver only re-initialised after bus errors, so it never recovered without a replug. A "no new data for 10 s" watchdog now resets the sensor; verified against a simulated stalled chip and on the hardware. The likely trigger is supply noise; a decoupling capacitor at the module is the hardware fix if stalls persist.
 
 ## Status
-Complete and running on hardware. All sensors are live: PMS5003 (UART1), ENS160 (0x53) and AHT21 (0x38) on I2C2, next to the ADXL345 (0x1D) and the OLED (0x3C). The ENS160/AHT21 drivers, written and tested against simulated chips before the module arrived, worked first time on the real hardware: AHT21 hundreds of reads with 0 CRC and 0 bus errors; ENS160 0 bus errors, compensated with the AHT21's temperature and humidity. As specified by ScioSense, the ENS160 reports "initial start-up" for its first hour of use and then "warm-up" for about 3 minutes after every power-on. TVOC and eCO₂ are indicative until it reports normal operation.
+Complete and running on hardware. All sensors are live: PMS5003 (UART1), ENS160 (0x53) and AHT21 (0x38) on I2C2, next to the ADXL345 (0x1D) and the OLED (0x3C). The ENS160/AHT21 drivers, written and tested against simulated chips before the module arrived, worked first time on the real hardware: AHT21 hundreds of reads with 0 CRC and 0 bus errors; ENS160 0 bus errors, compensated with the AHT21's temperature and humidity. As specified by ScioSense, the ENS160 reports "initial start-up" for its first hour of use and then "warm-up" for about 3 minutes after every power-on. TVOC and eCO₂ are indicative until it reports normal operation. The daily self-test currently reports 0 FAIL.

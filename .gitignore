@@ -62,3 +62,4 @@ dts/*.dtbo
 android/build/
 android/app/
 *.jks
+.DS_Store
