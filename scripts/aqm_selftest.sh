@@ -4,9 +4,10 @@
 # Also runs daily from aqm-selftest.timer: journalctl -u aqm-selftest -n 70
 P=0; W=0; F=0
 if [ -t 1 ]; then G='\e[32m' Y='\e[33m' R='\e[31m' B='\e[1m' N='\e[0m'; else G= Y= R= B= N=; fi
+RES=()                                   # WARN/FAIL lines, published for the phone app
 pass() { printf "  ${G}PASS${N}  %s\n" "$*"; P=$((P+1)); }
-warn() { printf "  ${Y}WARN${N}  %s\n" "$*"; W=$((W+1)); }
-fail() { printf "  ${R}FAIL${N}  %s\n" "$*"; F=$((F+1)); }
+warn() { printf "  ${Y}WARN${N}  %s\n" "$*"; W=$((W+1)); RES+=("WARN	$*"); }
+fail() { printf "  ${R}FAIL${N}  %s\n" "$*"; F=$((F+1)); RES+=("FAIL	$*"); }
 hdr()  { printf "\n${B}== %s${N}\n" "$*"; }
 sudo -v || exit 1
 
@@ -53,7 +54,7 @@ done
 hdr "Sensors (latest log lines)"
 j=$(journalctl -u aqm --since "-60 s" --no-pager -q -o cat)
 pms=$(grep 'PMS5003:' <<<"$j" | tail -1); aht=$(grep 'AHT21:' <<<"$j" | tail -1); ens=$(grep 'ENS160:' <<<"$j" | tail -1)
-[ -n "$pms" ] && { grep -q ' 0 bad checksum' <<<"$pms" && pass "PMS5003 ${pms##*sense }" || warn "PMS5003 ${pms##*sense }"; } || fail "no PMS5003 log in the last 60 s"
+[ -n "$pms" ] && { grep -q ' 0 bad checksum' <<<"$pms" && pass "PMS5003 ${pms##*PMS5003: }" || warn "PMS5003 ${pms##*PMS5003: }"; } || fail "no PMS5003 log in the last 60 s"
 [ -n "$aht" ] && { grep -q '0 bad CRC, 0 bus errors' <<<"$aht" && pass "AHT21 ${aht##*AHT21: }" || warn "AHT21 ${aht##*AHT21: }"; } || fail "no AHT21 log in the last 60 s"
 if [ -n "$ens" ]; then
     grep -q 'valid' <<<"$ens" && pass "ENS160 ${ens##*ENS160: }" || warn "ENS160 not 'valid' yet (warm-up ~3 min): ${ens##*ENS160: }"
@@ -84,5 +85,18 @@ journalctl -u aqm -b --no-pager -q -o cat | grep -q 'Modbus RTU slave' && pass "
 hdr "Result"
 printf '  %d PASS, %d WARN, %d FAIL\n' $P $W $F
 [ $F -eq 0 ] && echo "  Board healthy." || echo "  Check the FAIL lines above."
-echo "  Not testable from software: OLED picture, fans spinning, red LED -> look at the board."
+echo "  Not testable from software: OLED picture, red LED -> look at the board."
+
+# publish the summary (retained) for the phone app: aqm/bbb-aqi/health
+jesc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "${s//$'\t'/ }"; }
+items=
+for r in "${RES[@]}"; do
+    items+="${items:+,}{\"s\":\"${r%%$'\t'*}\",\"t\":\"$(jesc "${r#*$'\t'}")\"}"
+done
+msg="{\"ts\":$(date +%s),\"pass\":$P,\"warn\":$W,\"fail\":$F,\"items\":[${items}]}"
+if mosquitto_pub -h 127.0.0.1 -p 1884 -t aqm/bbb-aqi/health -r -q 1 -m "$msg" 2>/dev/null; then
+    echo "  Result sent to the phone app (MQTT aqm/bbb-aqi/health)."
+else
+    echo "  Could not send the result to MQTT (is mosquitto running?)."
+fi
 exit $((F > 0))

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:background="@drawable/widget_bg"
+    android:padding="10dp">
+
+    <FrameLayout
+        android:layout_width="104dp"
+        android:layout_height="match_parent">
+        <ImageView
+            android:id="@+id/aqi_bg"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitXY"
+            android:src="@drawable/tile" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical">
+            <TextView android:id="@+id/aqi_lbl" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="AQI"
+                android:textSize="12sp" android:textColor="#000000" />
+            <TextView android:id="@+id/aqi" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="--"
+                android:textSize="38sp" android:textStyle="bold" android:textColor="#000000" />
+            <TextView android:id="@+id/cat" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="-"
+                android:textSize="12sp" android:textStyle="bold" android:textColor="#000000"
+                android:maxLines="1" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_marginStart="12dp"
+        android:orientation="vertical">
+        <TextView android:id="@+id/l1" android:layout_width="match_parent"
+            android:layout_height="0dp" android:layout_weight="1" android:gravity="center_vertical"
+            android:text="PM2.5 --   PM10 --" android:textSize="15sp" android:textColor="#FFFFFF"
+            android:textStyle="bold" android:maxLines="1" />
+        <TextView android:id="@+id/l2" android:layout_width="match_parent"
+            android:layout_height="0dp" android:layout_weight="1" android:gravity="center_vertical"
+            android:text="-- °C   -- %RH" android:textSize="15sp" android:textColor="#FFFFFF"
+            android:maxLines="1" />
+        <TextView android:id="@+id/l3" android:layout_width="match_parent"
+            android:layout_height="0dp" android:layout_weight="1" android:gravity="center_vertical"
+            android:text="TVOC --   eCO₂ --" android:textSize="14sp" android:textColor="#FFFFFF"
+            android:maxLines="1" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="0dp"
+            android:layout_weight="1" android:orientation="horizontal"
+            android:gravity="center_vertical">
+            <TextView android:id="@+id/upd" android:layout_width="0dp"
+                android:layout_height="wrap_content" android:layout_weight="1"
+                android:text="tap ⟳ to load" android:textSize="12sp" android:textColor="#A0A0A8"
+                android:maxLines="1" />
+            <TextView android:id="@+id/refresh" android:layout_width="40dp"
+                android:layout_height="40dp" android:gravity="center"
+                android:text="⟳" android:textSize="22sp" android:textColor="#FFFFFF" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

@@ -25,6 +25,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.text.SimpleDateFormat;
@@ -56,7 +57,7 @@ public class MainActivity extends Activity implements Mqtt.Listener {
     private Thread mqttThread;
 
     /* last data, for ages */
-    private long lastSampleMs, lastNetMs;
+    private long lastSampleMs, lastNetMs, lastWidgetMs;
     private String linkState = "-", linkHost = "-", linkIp = null, boardStatus = null;
     private long msgCount;
 
@@ -135,6 +136,14 @@ public class MainActivity extends Activity implements Mqtt.Listener {
                 kv("s_ens", "ENS160  (TVOC / eCO₂)"),
                 kv("s_aht", "AHT21  (temp / humidity)"),
                 kv("alarm", "Last alarm")));
+
+        TextView hItems = text("", 14, Color.WHITE, false);
+        hItems.setPadding(0, dp(6), 0, 0);
+        v.put("h_items", hItems);
+        root.addView(section("Board health (daily self-test)",
+                kv("h_res", "Result"),
+                kv("h_when", "Last run"),
+                hItems));
 
         root.addView(section("Connection",
                 kv("c_phone", "Phone network"),
@@ -235,6 +244,7 @@ public class MainActivity extends Activity implements Mqtt.Listener {
                         case "avg":    onAvg(new JSONObject(payload)); break;
                         case "net":    onNet(new JSONObject(payload)); break;
                         case "alarm":  onAlarm(new JSONObject(payload)); break;
+                        case "health": onHealth(new JSONObject(payload)); break;
                         case "status": boardStatus = payload.trim(); showLink(); break;
                         default: break;
                     }
@@ -328,6 +338,11 @@ public class MainActivity extends Activity implements Mqtt.Listener {
         set("s_ens", ensOk ? "OK" : "FAULT", ensOk ? OK : BAD);
         set("s_aht", ahtOk ? "OK" : "FAULT", ahtOk ? OK : BAD);
         updateAge();
+        if (lastSampleMs - lastWidgetMs >= 10000) {   /* keep the widget fresh while the app is open */
+            lastWidgetMs = lastSampleMs;
+            AqmWidget.saveSample(this, j.toString(), AqmWidget.pathName(linkIp));
+            AqmWidget.render(this);
+        }
     }
 
     private void onAvg(JSONObject j) {
@@ -371,6 +386,27 @@ public class MainActivity extends Activity implements Mqtt.Listener {
         long up = j.optLong("uptime", 0);
         set("w_up", String.format(Locale.US, "%dd %02dh %02dm", up / 86400, (up / 3600) % 24, (up / 60) % 60));
         set("w_load", j.optString("load", "-") + "  /  " + (j.optLong("mem_avail_kb", 0) / 1024) + " MB");
+    }
+
+    /* summary of scripts/aqm_selftest.sh, retained on aqm/bbb-aqi/health */
+    private void onHealth(JSONObject j) {
+        int pass = j.optInt("pass"), warn = j.optInt("warn"), fail = j.optInt("fail");
+        long ts = j.optLong("ts") * 1000;
+        long ageH = (System.currentTimeMillis() - ts) / 3600000L;
+        String res = fail > 0 ? fail + " FAIL, " + warn + " WARN" : warn > 0 ? "OK, " + warn + " WARN" : "All OK";
+        set("h_res", res + "  (" + pass + " passed)", fail > 0 ? BAD : warn > 0 ? WARN : OK);
+        set("h_when", new SimpleDateFormat("d MMM, h:mm a", Locale.US).format(new Date(ts))
+                + (ageH >= 26 ? "  (overdue)" : ""), ageH >= 26 ? WARN : Color.WHITE);
+        StringBuilder sb = new StringBuilder();
+        JSONArray items = j.optJSONArray("items");
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject it = items.optJSONObject(i);
+            if (it == null) continue;
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append(it.optString("s")).append(": ").append(it.optString("t"));
+        }
+        set("h_items", sb.length() > 0 ? sb.toString() : "No warnings or failures.",
+                fail > 0 ? BAD : warn > 0 ? WARN : DIM);
     }
 
     private void onAlarm(JSONObject j) {
