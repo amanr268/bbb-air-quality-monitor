@@ -20,6 +20,11 @@ aqm_mqtt_t *aqm_mqtt_start(const char *conf_path);
 int         aqm_mqtt_publish(aqm_mqtt_t *m, const char *subtopic, const char *payload,
                              int qos, int retain);
 int         aqm_mqtt_connected(const aqm_mqtt_t *m);
+/* remote OLED control from the phone app: report subscribes to
+ * <topic>/cmd/oled/power ("on"/"off") and <topic>/cmd/oled/brightness (0..100).
+ * Returns 1 if a command arrived since the last call; *power = -1/0/1,
+ * *brightness = -1 or 0..100 (-1 = not part of this update). */
+int         aqm_mqtt_take_oled(aqm_mqtt_t *m, int *power, int *brightness);
 /* publishes "offline", disconnects, joins the network thread */
 void        aqm_mqtt_stop(aqm_mqtt_t *m);
 

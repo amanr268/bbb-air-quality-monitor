@@ -17,6 +17,7 @@ struct aqm_mqtt {
     char  host[64], topic[64], user[64], pass[64];
     int   port, keepalive;
     int   connected;            /* written by the network thread */
+    int   cmd_power, cmd_bright;   /* OLED commands from the app, -1 = none */
     unsigned long dropped;      /* publishes while offline */
 };
 
@@ -65,7 +66,42 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
     __atomic_store_n(&m->connected, 1, __ATOMIC_RELEASE);
     topic_of(m, "status", t, sizeof(t));
     mosquitto_publish(mosq, NULL, t, 6, "online", 1, true);
+    topic_of(m, "cmd/oled/#", t, sizeof(t));
+    mosquitto_subscribe(mosq, NULL, t, 1);      /* retained brightness arrives at once */
     aqm_log("report", "MQTT connected to %s:%d, publishing under %s/", m->host, m->port, m->topic);
+}
+
+/* network thread: only stores the command; report applies it in its loop */
+static void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
+{
+    struct aqm_mqtt *m = obj;
+    char v[16] = "";
+    const char *t = msg->topic;
+    size_t n = strlen(t);
+
+    (void)mosq;
+    if (msg->payloadlen > 0)
+        snprintf(v, sizeof(v), "%.*s", msg->payloadlen < 15 ? msg->payloadlen : 15,
+                 (const char *)msg->payload);
+    if (n >= 10 && !strcmp(t + n - 10, "oled/power")) {
+        if (!strcmp(v, "on") || !strcmp(v, "off"))
+            __atomic_store_n(&m->cmd_power, v[1] == 'n', __ATOMIC_RELEASE);
+    } else if (n >= 15 && !strcmp(t + n - 15, "oled/brightness")) {
+        char *end;
+        long b = strtol(v, &end, 10);
+
+        if (end != v && b >= 0 && b <= 100)
+            __atomic_store_n(&m->cmd_bright, (int)b, __ATOMIC_RELEASE);
+    }
+}
+
+int aqm_mqtt_take_oled(aqm_mqtt_t *m, int *power, int *brightness)
+{
+    if (!m)
+        return 0;
+    *power = __atomic_exchange_n(&m->cmd_power, -1, __ATOMIC_ACQ_REL);
+    *brightness = __atomic_exchange_n(&m->cmd_bright, -1, __ATOMIC_ACQ_REL);
+    return *power >= 0 || *brightness >= 0;
 }
 
 static void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
@@ -88,6 +124,7 @@ aqm_mqtt_t *aqm_mqtt_start(const char *conf_path)
         return NULL;
     m->port = 1883;
     m->keepalive = 30;
+    m->cmd_power = m->cmd_bright = -1;
     snprintf(m->topic, sizeof(m->topic), "aqm/bbb-aqi");
     if ((rc = load_conf(m, conf_path, &enabled)) != 0 || !enabled || !m->host[0]) {
         aqm_log("report", "MQTT off (%s)", rc ? strerror(-rc) :
@@ -108,6 +145,7 @@ aqm_mqtt_t *aqm_mqtt_start(const char *conf_path)
     mosquitto_will_set(m->mosq, will, 7, "offline", 1, true);   /* broker says it for us */
     mosquitto_connect_callback_set(m->mosq, on_connect);
     mosquitto_disconnect_callback_set(m->mosq, on_disconnect);
+    mosquitto_message_callback_set(m->mosq, on_message);
     mosquitto_reconnect_delay_set(m->mosq, 1, 10, true);        /* 1, 2, 4, 8, 10 s */
     /* report runs under mlockall(MCL_FUTURE): give the network thread a small
      * stack instead of the 8 MB default, which would all be locked in RAM */
@@ -205,6 +243,13 @@ int aqm_mqtt_publish(aqm_mqtt_t *m, const char *subtopic, const char *payload, i
 int aqm_mqtt_connected(const aqm_mqtt_t *m)
 {
     (void)m;
+    return 0;
+}
+
+int aqm_mqtt_take_oled(aqm_mqtt_t *m, int *power, int *brightness)
+{
+    (void)m;
+    *power = *brightness = -1;
     return 0;
 }
 

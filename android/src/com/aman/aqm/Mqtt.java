@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Minimal MQTT 3.1.1 subscriber (no library): CONNECT with username/password,
@@ -33,6 +34,22 @@ final class Mqtt implements Runnable {
     private final Listener l;
     private volatile boolean running = true;
     private volatile Socket sock;
+    private volatile boolean up;                    /* CONNACK received */
+    /* outgoing PUBLISH packets, written by the session thread only */
+    private final ConcurrentLinkedQueue<byte[]> outq = new ConcurrentLinkedQueue<>();
+
+    /** Queue a QoS 0 publish (e.g. an OLED command). false if not connected. */
+    boolean publish(String topic, String payload, boolean retain) {
+        if (!up) return false;
+        ByteArrayOutputStream v = new ByteArrayOutputStream();
+        str(v, topic);
+        byte[] b = payload.getBytes(StandardCharsets.UTF_8);
+        v.write(b, 0, b.length);
+        ByteArrayOutputStream p = new ByteArrayOutputStream();
+        frame(p, 0x30 | (retain ? 1 : 0), v.toByteArray());
+        outq.add(p.toByteArray());
+        return true;
+    }
 
     Mqtt(String[] hosts, int port, String user, String pass, String filter, Listener l) {
         this.hosts = hosts;
@@ -118,10 +135,11 @@ final class Mqtt implements Runnable {
         v.write(1);
         send(out, 0x82, v.toByteArray());
 
+        up = true;
         l.onState("connected", host, s.getInetAddress().getHostAddress());
 
         long lastTx = System.currentTimeMillis(), lastRx = lastTx;
-        s.setSoTimeout(1000);
+        s.setSoTimeout(250);                        /* short: outgoing commands go out fast */
         while (running) {
             body = readPacket(in, hdr, false);
             long now = System.currentTimeMillis();
@@ -134,6 +152,12 @@ final class Mqtt implements Runnable {
                     if (body.length >= 3 && (body[2] & 0xff) == 0x80)
                         throw new IOException("subscribe refused (ACL?)");
                 }
+            }
+            byte[] o;
+            while ((o = outq.poll()) != null) {
+                out.write(o);
+                out.flush();
+                lastTx = now;
             }
             if (now - lastTx > (KEEPALIVE_S * 1000L) / 2) {
                 send(out, 0xC0, new byte[0]);       /* PINGREQ */
@@ -193,6 +217,13 @@ final class Mqtt implements Runnable {
 
     private static void send(OutputStream out, int h, byte[] body) throws IOException {
         ByteArrayOutputStream p = new ByteArrayOutputStream();
+        frame(p, h, body);
+        out.write(p.toByteArray());
+        out.flush();
+    }
+
+    /** fixed header + variable-length "remaining length" + body */
+    private static void frame(ByteArrayOutputStream p, int h, byte[] body) {
         p.write(h);
         int len = body.length;
         do {
@@ -202,8 +233,6 @@ final class Mqtt implements Runnable {
             p.write(d);
         } while (len > 0);
         p.write(body, 0, body.length);
-        out.write(p.toByteArray());
-        out.flush();
     }
 
     private static void str(ByteArrayOutputStream v, String s) {
@@ -223,6 +252,7 @@ final class Mqtt implements Runnable {
     }
 
     private void closeQuiet() {
+        up = false;
         Socket s = sock;
         if (s != null) {
             try { s.close(); } catch (IOException ignored) { }

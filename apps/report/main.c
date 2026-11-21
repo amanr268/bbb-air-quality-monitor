@@ -74,6 +74,10 @@ typedef struct {
     int          screen_off;          /* OLED blanked by a triple press          */
     int          presses;             /* presses not yet acted on                */
     int64_t      press_ns;            /* time of the last of them                */
+    int          bright_pct;          /* OLED brightness 0..100 (set from the app) */
+    int          contrast_sent;       /* brightness the panel has, -1 = unknown    */
+    int          oled_pub;            /* OLED state changed: publish it            */
+    int64_t      oled_pub_ns;         /* last time the state was published         */
 } display_t;
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
@@ -93,6 +97,7 @@ static void display_open(display_t *dp)
         return;
     }
     dp->have_lcd = 1;
+    dp->contrast_sent = -1;               /* (re)opened panel: apply our brightness */
     if (dp->warned)
         aqm_log("report", "OLED available now");
 
@@ -148,6 +153,9 @@ static void display_init(display_t *dp)
     memset(dp, 0, sizeof(*dp));
     dp->acc.fd = -1;
     dp->btn_fd = dp->led_fd = -1;
+    dp->bright_pct = 81;                  /* = the driver's default contrast 0xCF */
+    dp->contrast_sent = -1;
+    dp->oled_pub = 1;
     display_open(dp);
     io_open(dp);
 }
@@ -241,7 +249,7 @@ static void led_tick(display_t *dp)
 
 /* short press: next page; info pages time out back to the main page */
 /* panel off (0xAE, ~10 uA) / on (0xAF); everything else keeps running */
-static void screen_power(display_t *dp, int on)
+static void screen_power(display_t *dp, int on, const char *by)
 {
     uint8_t cmd = on ? 0xAF : 0xAE;
 
@@ -253,7 +261,39 @@ static void screen_power(display_t *dp, int on)
         dp->lcd.shadow_valid = 0;          /* full redraw */
         dp->dirty = 1;
     }
-    aqm_log("report", "OLED %s by button", on ? "on" : "off");
+    dp->oled_pub = 1;
+    aqm_log("report", "OLED %s by %s", on ? "on" : "off", by);
+}
+
+/* OLED commands from the phone app (MQTT), brightness, and the retained state
+ * topic <topic>/oled = {"on":true,"brightness":81} that the app displays */
+static void oled_remote_tick(display_t *dp)
+{
+    int pw, br;
+
+    if (aqm_mqtt_take_oled(g_mqtt, &pw, &br)) {
+        if (br >= 0 && br != dp->bright_pct) {
+            dp->bright_pct = br;
+            dp->oled_pub = 1;
+            aqm_log("report", "OLED brightness %d %% (app)", br);
+        }
+        if (pw >= 0 && pw == dp->screen_off)          /* state differs */
+            screen_power(dp, pw, "app");
+    }
+    if (dp->have_lcd && dp->contrast_sent != dp->bright_pct &&
+        ssd1306_contrast(&dp->lcd, (uint8_t)((dp->bright_pct * 255 + 50) / 100)) == 0)
+        dp->contrast_sent = dp->bright_pct;
+    if ((dp->oled_pub || mono_ns() - dp->oled_pub_ns > 60LL * 1000000000LL) &&
+        aqm_mqtt_connected(g_mqtt)) {
+        char js[64];
+
+        snprintf(js, sizeof(js), "{\"on\":%s,\"brightness\":%d}",
+                 dp->screen_off ? "false" : "true", dp->bright_pct);
+        if (aqm_mqtt_publish(g_mqtt, "oled", js, 1, 1) == 0) {
+            dp->oled_pub = 0;
+            dp->oled_pub_ns = mono_ns();
+        }
+    }
 }
 
 static void button_tick(display_t *dp)
@@ -278,11 +318,11 @@ static void button_tick(display_t *dp)
     }
     if (dp->presses >= OFF_PRESSES && !dp->screen_off) {
         dp->presses = 0;
-        screen_power(dp, 0);
+        screen_power(dp, 0, "button");
     } else if (dp->presses > 0 &&
                mono_ns() - dp->press_ns >= (int64_t)MULTI_GAP_MS * 1000000LL) {
         if (dp->screen_off) {
-            screen_power(dp, 1);
+            screen_power(dp, 1, "button");
         } else if (dp->have_lcd) {
             dp->page = (dp->page + dp->presses) % AQM_PAGE_COUNT;
             dp->page_until_ns = mono_ns() + (int64_t)PAGE_MS * 1000000LL;
@@ -445,6 +485,7 @@ int main(int argc, char **argv)
         int rc = aqm_ring_pop(&shm->ring[AQM_RING_COMPARE_REPORT], &s, TICK_MS);
 
         drain_alarms(q, &disp);
+        oled_remote_tick(&disp);
 
         if (rc == 0) {
             /* TODO Phase 5: MQTT publish, Modbus registers */

@@ -23,6 +23,8 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
+import android.widget.Toast;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -54,6 +56,12 @@ public class MainActivity extends Activity implements Mqtt.Listener {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Map<String, TextView> v = new HashMap<>();
     private Mqtt mqtt;
+    /* OLED remote control: state reported by the board (aqm/bbb-aqi/oled) */
+    private Boolean oledOn;
+    private Button oledBtn;
+    private SeekBar oledBar;
+    private TextView oledPct;
+    private boolean dragging;
     private Thread mqttThread;
 
     /* last data, for ages */
@@ -144,6 +152,38 @@ public class MainActivity extends Activity implements Mqtt.Listener {
                 kv("h_res", "Result"),
                 kv("h_when", "Last run"),
                 hItems));
+
+        /* OLED on/off + brightness, sent to the board over MQTT */
+        oledBtn = new Button(this);
+        oledBtn.setText("Turn OLED off");
+        oledBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View x) {
+                boolean on = oledOn != null && !oledOn;     /* unknown state: send "off" */
+                send("cmd/oled/power", on ? "on" : "off", false);
+            }
+        });
+        LinearLayout barRow = row();
+        oledBar = new SeekBar(this);
+        oledBar.setMax(99);                                 /* 1..100 % */
+        oledPct = text("-", 16, Color.WHITE, true);
+        oledBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int p, boolean user) {
+                if (user) oledPct.setText((p + 1) + " %");
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) { dragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar b) {
+                dragging = false;
+                send("cmd/oled/brightness", String.valueOf(b.getProgress() + 1), true);
+            }
+        });
+        barRow.addView(text("Brightness", 15, DIM, false));
+        barRow.addView(oledBar, new LinearLayout.LayoutParams(0, -2, 1));
+        barRow.addView(oledPct);
+        root.addView(section("Display (OLED)",
+                kv("o_state", "OLED on the board"),
+                oledBtn, barRow,
+                text("Lower brightness and switching off when not needed extend the OLED's life.", 12, DIM, false)));
 
         root.addView(section("Connection",
                 kv("c_phone", "Phone network"),
@@ -245,6 +285,7 @@ public class MainActivity extends Activity implements Mqtt.Listener {
                         case "net":    onNet(new JSONObject(payload)); break;
                         case "alarm":  onAlarm(new JSONObject(payload)); break;
                         case "health": onHealth(new JSONObject(payload)); break;
+                        case "oled":   onOled(new JSONObject(payload)); break;
                         case "status": boardStatus = payload.trim(); showLink(); break;
                         default: break;
                     }
@@ -386,6 +427,22 @@ public class MainActivity extends Activity implements Mqtt.Listener {
         long up = j.optLong("uptime", 0);
         set("w_up", String.format(Locale.US, "%dd %02dh %02dm", up / 86400, (up / 3600) % 24, (up / 60) % 60));
         set("w_load", j.optString("load", "-") + "  /  " + (j.optLong("mem_avail_kb", 0) / 1024) + " MB");
+    }
+
+    private void send(String sub, String payload, boolean retain) {
+        if (mqtt == null || !mqtt.publish(TOPIC + "/" + sub, payload, retain))
+            Toast.makeText(this, "Not connected to the board", Toast.LENGTH_SHORT).show();
+    }
+
+    private void onOled(JSONObject j) {
+        oledOn = j.optBoolean("on", true);
+        int b = Math.max(1, Math.min(100, j.optInt("brightness", 81)));
+        set("o_state", (oledOn ? "On" : "Off") + "  ·  brightness " + b + " %", oledOn ? OK : WARN);
+        oledBtn.setText(oledOn ? "Turn OLED off" : "Turn OLED on");
+        if (!dragging) {
+            oledBar.setProgress(b - 1);
+            oledPct.setText(b + " %");
+        }
     }
 
     /* summary of scripts/aqm_selftest.sh, retained on aqm/bbb-aqi/health */

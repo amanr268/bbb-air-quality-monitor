@@ -6,6 +6,8 @@ and a programmatic UI (`MainActivity.java`). APK ≈ 30 KB.
 
 Home-screen widget (4x2, resizable): AQI tile, PM2.5/PM10, temperature, humidity, TVOC/eCO2, update time; refreshed every 15 min, on the refresh button, and every 10 s while the app is open.
 
+OLED control (v1.3): on/off button and brightness slider; commands go to aqm/bbb-aqi/cmd/oled/power ("on"/"off") and aqm/bbb-aqi/cmd/oled/brightness (1..100, retained); the board reports its state on aqm/bbb-aqi/oled.
+
 Board health: the daily self-test result (aqm/bbb-aqi/health): result, time of the last run, every WARN/FAIL line.
 
 Shows: AQI (CPCB colours), PM1/PM2.5/PM10, TVOC, eCO₂, temperature, humidity,

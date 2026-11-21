@@ -1,3 +1,4 @@
-# read-only access to the monitor topics
+# phone/Mac account: read the monitor topics, and send OLED commands only
 user phone
 topic read aqm/#
+topic write aqm/bbb-aqi/cmd/#

@@ -151,11 +151,13 @@ Rolling means over 1, 5, 10, 20 min (ring of 1 200 one-second samples with runni
 | `alarm` | 1 | AQI category changes, sensor faults, TVOC |
 | `net` | 1, retained | board Wi-Fi / system info every 10 s ([`scripts/aqm_netinfo.sh`](scripts/aqm_netinfo.sh)) |
 | `health` | 1, retained | self-test summary: time, PASS/WARN/FAIL counts, every WARN/FAIL line |
+| `oled` | 1, retained | OLED state `{"on":true,"brightness":60}` |
+| `cmd/oled/power`, `cmd/oled/brightness` | from the app | OLED on/off and brightness 1–100 % (brightness retained, survives restarts) |
 
-libmosquitto with automatic reconnect (1–10 s back-off); the network thread runs on a 256 KiB stack because the process is `mlockall`ed. The broker runs **on the board** ([`config/mosquitto-aqm.conf`](config/mosquitto-aqm.conf)): an anonymous listener on `127.0.0.1:1884` for the board's own publishers, and a password-protected, read-only listener on port 1883 for the network.
+libmosquitto with automatic reconnect (1–10 s back-off); the network thread runs on a 256 KiB stack because the process is `mlockall`ed. The broker runs **on the board** ([`config/mosquitto-aqm.conf`](config/mosquitto-aqm.conf)): an anonymous listener on `127.0.0.1:1884` for the board's own publishers, and a password-protected listener on port 1883 for the network, where the phone account may read everything but write only `cmd/` topics.
 
 ### Android app — [`android/`](android/)
-One-page live view for a phone (laid out for a Galaxy S25+): AQI in the CPCB colour, all readings, dew point and feels-like, averages, sensor health, the last alarm, the board's Wi-Fi details and the **Board health** result of the daily self-test. A home-screen widget shows the essentials (refreshed every 15 min, on tap, and live while the app is open). Plain Java with its own ~200-line MQTT 3.1.1 client — no libraries, no Gradle; built with `aapt` / `dx` / `apksigner` ([`android/build.sh`](android/build.sh)). It tries the home IP first and falls back to the board's **Tailscale** name, so it also works on mobile data.
+One-page live view for a phone (laid out for a Galaxy S25+): AQI in the CPCB colour, all readings, dew point and feels-like, averages, sensor health, the last alarm, the board's Wi-Fi details, the **Board health** result of the daily self-test, and **OLED controls** (on/off button and brightness slider, to save the panel from burn-in). A home-screen widget shows the essentials (refreshed every 15 min, on tap, and live while the app is open). Plain Java with its own ~200-line MQTT 3.1.1 client — no libraries, no Gradle; built with `aapt` / `dx` / `apksigner` ([`android/build.sh`](android/build.sh)). It tries the home IP first and falls back to the board's **Tailscale** name, so it also works on mobile data.
 
 ### Modbus RTU (RS485) — slave id 1, 9600 8N2, FC 03 / 04
 | Reg | Value | Reg | Value |
