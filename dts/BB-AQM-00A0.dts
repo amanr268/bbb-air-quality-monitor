@@ -115,3 +115,23 @@
 		};
 	};
 };
+
+/*
+ * 3.3 V rail on the P9.3/P9.4 header pins (VDD_3V3B). It powers the
+ * cape EEPROMs (I2C2 0x54-0x57); naming it stops at24 from logging
+ * "supply vcc not found, using dummy regulator".
+ */
+&{/} {
+	aqm_vdd_3v3b: fixedregulator-vdd-3v3b {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_3v3b";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+};
+
+&cape_eeprom0 { vcc-supply = <&aqm_vdd_3v3b>; };
+&cape_eeprom1 { vcc-supply = <&aqm_vdd_3v3b>; };
+&cape_eeprom2 { vcc-supply = <&aqm_vdd_3v3b>; };
+&cape_eeprom3 { vcc-supply = <&aqm_vdd_3v3b>; };
