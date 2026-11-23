@@ -94,6 +94,7 @@ ROM → custom U-Boot 2022.04-aqm (eMMC) → PREEMPT_RT 6.12.111-bone-rt-r73 →
 
 ### PREEMPT_RT kernel
 - Built with RobertCNelson's `bb-kernel` (`am33x-rt-v6.12`) in a Docker container on an Apple-Silicon Mac, installed next to the stock kernel; selected with `uname_r` in `/boot/uEnv.txt`.
+- Carries **13 patches of my own** ([`kernel/patches/`](kernel/patches/)) that leave the boot log with **zero warnings** (`journalctl -k -b -p warning` prints nothing). One is a real bug fix: ti-sysc clock lookups for device names longer than 24 characters were silently broken. The others stop normal situations being logged as errors (deferred probe, dummy regulators, EDMA debugfs, fw_devlink, wl18xx notices). Rebuilt from the same tag, config and compiler, so only the zImage and `wlcore.ko` change.
 
 | cyclictest `-m -t1 -p 90 -i 1000 -D 5m` | Min | Avg | **Max** |
 |---|---|---|---|
@@ -116,7 +117,7 @@ One overlay for the whole board (replaces the stock UART overlays): pin-mux for 
 | Sensors | absent → simulated (development only), lost after working → fault flag, re-probed every 5 s (hot-plug); an ENS160 that stops producing data while still answering on I2C (seen in the field: STATUS `0x01`) is reset after 10 s, and all-zero frames are rejected |
 | Self-test | [`scripts/aqm_selftest.sh`](scripts/aqm_selftest.sh) from [`aqm-selftest.timer`](systemd/aqm-selftest.timer): daily at 09:13 and 10 min after boot; PASS / WARN / FAIL per check, result retained on MQTT `aqm/bbb-aqi/health` and shown in the app |
 | Display / input | opened with retry (udev applies permissions a few seconds after boot); OLED blanked on every stop, crash included (`report` blanks it first, then [`tools/oled_off`](tools/oled_off.c) from `ExecStopPost`) |
-| Power button | one tap = clean shutdown with full power-off, one tap = power on. Needs the RTC alarm to drive `PMIC_POWER_EN`; this board's 32 kHz crystal is dead, so [`systemd/rtc-int32k.service`](systemd/rtc-int32k.service) moves the RTC to the internal 32 kHz clock at boot |
+| Power button | hold ~5 s = clean shutdown with full power-off (a short tap is ignored, [`config/logind-aqm-power.conf`](config/logind-aqm-power.conf), after a noise glitch once powered the board off at night); one tap = power on. Needs the RTC alarm to drive `PMIC_POWER_EN`; this board's 32 kHz crystal is dead, so [`systemd/rtc-int32k.service`](systemd/rtc-int32k.service) moves the RTC to the internal 32 kHz clock at boot |
 
 ### Boot-time optimisation
 `systemd-analyze` showed services this device does not need competing for the single core: `bb-usb-gadgets` (17 s), nginx + Cockpit, an on-board Mosquitto, Bluetooth, `gpio-manager`. Disabling them: **59.2 s → 47.2 s**.
@@ -130,7 +131,7 @@ What the user sees is **first live data on the OLED**, measured from kernel star
 | `aqm.service` uses `DefaultDependencies=no` and starts right after the rootfs, journald, mqueue and `time-set.target`, not after `/boot/firmware` and all of `sysinit` | ~8 s |
 | `quiet` kernel console (115200-baud printing slowed the kernel), unused HDMI/audio/ADC/PRU overlays dropped: kernel 16.0 → 12.2 s | ~4 s |
 
-Masking `bluetooth.service` alone still left the kernel uploading firmware to the WL1835's Bluetooth core at every boot, so [`config/aqm-no-bluetooth.conf`](config/aqm-no-bluetooth.conf) also blocks the `hci_uart` and `bluetooth` modules.
+Masking `bluetooth.service` alone still left the kernel uploading firmware to the WL1835's Bluetooth core at every boot, so [`config/aqm-no-bluetooth.conf`](config/aqm-no-bluetooth.conf) also blocks every Bluetooth kernel module (`hci_uart`, `bluetooth`, `btbcm`, `btintel`, …; the list is generated from `drivers/bluetooth` and `net/bluetooth`).
 
 ---
 
@@ -206,7 +207,8 @@ Unit tests for the rings, shared memory, AQI, SQLite store, orientation, SSD1306
 - **A sensor fault must never look like clean air** — every output path (OLED, log, JSON, Modbus) distinguishes "no data" from 0.
 - **Read the hardware, don't assume it.** The HW-519's TXD/RXD labels are straight-through, its input has an LED pull-up (a 10 kΩ series resistor was too weak), and its MAX485 must run at 3.3 V on a 3.3 V SoC — all found by measuring.
 - **Follow a fault down to the register.** `poweroff` ended in a kernel panic with the board still powered. The device tree was correct and the TPS65217 was armed (STATUS `0x80`). But `/sys/class/rtc/rtc0/since_epoch` never changed, and reading the RTC registers through `/dev/mem` showed it set to run from the external crystal yet never running (`STATUS=00`). With a dead 32 kHz crystal the RTC alarm that drives `PMIC_POWER_EN` never fires. Switching the RTC to the internal 32 kHz clock fixed it in software.
+- **A silent boot log makes every warning mean something.** Each of ~30 boot warnings was traced to the line of kernel code that prints it: one real bug was fixed, a missing supply was added to the device tree, and normal situations were downgraded in the driver with an explanation instead of hiding them with a log level.
 - **Watch the data, not only the bus.** After 1–3 h the ENS160 sometimes stopped producing data while still answering on I2C: no bus errors, read counter frozen, OPMODE still `0x02`, DEVICE_STATUS `0x01` (measurement engine stopped). The driver only re-initialised after bus errors, so it never recovered without a replug. A "no new data for 10 s" watchdog now resets the sensor; verified against a simulated stalled chip and on the hardware. The likely trigger is supply noise; a decoupling capacitor at the module is the hardware fix if stalls persist.
 
 ## Status
-Complete and running on hardware. All sensors are live: PMS5003 (UART1), ENS160 (0x53) and AHT21 (0x38) on I2C2, next to the ADXL345 (0x1D) and the OLED (0x3C). The ENS160/AHT21 drivers, written and tested against simulated chips before the module arrived, worked first time on the real hardware: AHT21 hundreds of reads with 0 CRC and 0 bus errors; ENS160 0 bus errors, compensated with the AHT21's temperature and humidity. As specified by ScioSense, the ENS160 reports "initial start-up" for its first hour of use and then "warm-up" for about 3 minutes after every power-on. TVOC and eCO₂ are indicative until it reports normal operation. The daily self-test currently reports 0 FAIL.
+Complete and running on hardware. All sensors are live: PMS5003 (UART1), ENS160 (0x53) and AHT21 (0x38) on I2C2, next to the ADXL345 (0x1D) and the OLED (0x3C). The ENS160/AHT21 drivers, written and tested against simulated chips before the module arrived, worked first time on the real hardware: AHT21 hundreds of reads with 0 CRC and 0 bus errors; ENS160 0 bus errors, compensated with the AHT21's temperature and humidity. As specified by ScioSense, the ENS160 reports "initial start-up" for its first hour of use and then "warm-up" for about 3 minutes after every power-on. TVOC and eCO₂ are indicative until it reports normal operation. The daily self-test currently reports 0 FAIL, and the kernel boot log has no warnings or errors.
