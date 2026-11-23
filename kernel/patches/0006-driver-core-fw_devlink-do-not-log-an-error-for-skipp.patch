@@ -1,0 +1,43 @@
+From c1a5dd5f55f4589c34f628a64b460783e666ec03 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:31:20 +0000
+Subject: [PATCH 6/6] driver core: fw_devlink: do not log an error for skipped
+ sync-state-only links
+
+device_link_add() deliberately refuses SYNC_STATE_ONLY links when the
+consumer has already probed, because such links only matter until
+then. On AM335x the ti-sysc system timers (44e31000, 48040000) probe
+early, so fw_devlink logs "Failed to create device link (0x180) with
+ocp" on every boot although nothing is wrong. Log that case at debug
+level; real link failures are still reported as errors.
+---
+ drivers/base/core.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/base/core.c b/drivers/base/core.c
+index 2e1cce626..b3f801e19 100644
+--- a/drivers/base/core.c
++++ b/drivers/base/core.c
+@@ -2237,8 +2237,17 @@ static int fw_devlink_create_devlink(struct device *con,
+ 		}
+ 
+ 		if (con != sup_dev && !device_link_add(con, sup_dev, flags)) {
+-			dev_err(con, "Failed to create device link (0x%x) with %s\n",
+-				flags, dev_name(sup_dev));
++			/*
++			 * SYNC_STATE_ONLY links are intentionally not created
++			 * once the consumer has probed (see device_link_add()),
++			 * e.g. for early system timers, so that is not an error.
++			 */
++			if (flags & DL_FLAG_SYNC_STATE_ONLY)
++				dev_dbg(con, "Not creating sync-state-only link (0x%x) with %s\n",
++					flags, dev_name(sup_dev));
++			else
++				dev_err(con, "Failed to create device link (0x%x) with %s\n",
++					flags, dev_name(sup_dev));
+ 			ret = -EINVAL;
+ 		}
+ 
+-- 
+2.43.0
+

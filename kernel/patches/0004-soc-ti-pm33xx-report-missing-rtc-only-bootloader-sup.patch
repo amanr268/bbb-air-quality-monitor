@@ -1,0 +1,30 @@
+From f92fd99736f61fd8dfbd2b9a32a4eb787733d256 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:31:05 +0000
+Subject: [PATCH 4/6] soc: ti: pm33xx: report missing rtc-only bootloader
+ support as info
+
+rtc-only is an optional deep-sleep mode that needs matching bootloader
+support. When the bootloader does not provide it, the mode is simply
+not used and normal suspend still works, so this is not a fault. Log it
+at info level instead of as a warning on every boot.
+---
+ drivers/soc/ti/pm33xx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/soc/ti/pm33xx.c b/drivers/soc/ti/pm33xx.c
+index 3da0d7c1f..613b24aca 100644
+--- a/drivers/soc/ti/pm33xx.c
++++ b/drivers/soc/ti/pm33xx.c
+@@ -458,7 +458,7 @@ static int am33xx_pm_rtc_setup(void)
+ 			nvmem_device_read(nvmem, RTC_SCRATCH_MAGIC_REG * 4,
+ 					  4, (void *)&rtc_magic_val);
+ 			if ((rtc_magic_val & 0xffff) != RTC_REG_BOOT_MAGIC)
+-				pr_warn("PM: bootloader does not support rtc-only!\n");
++				pr_info("PM: bootloader does not support rtc-only mode\n");
+ 
+ 			nvmem_device_write(nvmem, RTC_SCRATCH_MAGIC_REG * 4,
+ 					   4, (void *)&val);
+-- 
+2.43.0
+

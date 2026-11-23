@@ -1,0 +1,37 @@
+From a7e5326673c4bf45e8a63e1081a8f49122b2703c Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:31:04 +0000
+Subject: [PATCH 3/6] soc: ti: pm33xx: do not log an error while waiting for
+ wkup_m3_ipc
+
+wkup_m3_ipc only becomes available after remoteproc has booted the CM3
+firmware, so the first probe(s) of am33xx-pm are normally deferred.
+Each deferral logged "PM: Cannot get wkup_m3_ipc handle" at error
+level although the driver then probes fine. Use dev_err_probe(), which
+records the deferral reason without printing an error.
+---
+ drivers/soc/ti/pm33xx.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/soc/ti/pm33xx.c b/drivers/soc/ti/pm33xx.c
+index dc52a2197..3da0d7c1f 100644
+--- a/drivers/soc/ti/pm33xx.c
++++ b/drivers/soc/ti/pm33xx.c
+@@ -508,10 +508,10 @@ static int am33xx_pm_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	m3_ipc = wkup_m3_ipc_get();
+-	if (!m3_ipc) {
+-		pr_err("PM: Cannot get wkup_m3_ipc handle\n");
+-		return -EPROBE_DEFER;
+-	}
++	if (!m3_ipc)
++		/* wkup_m3 firmware not booted yet: normal, retry later */
++		return dev_err_probe(dev, -EPROBE_DEFER,
++				     "PM: wkup_m3_ipc handle not ready\n");
+ 
+ 	pm33xx_dev = dev;
+ 
+-- 
+2.43.0
+

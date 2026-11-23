@@ -1,0 +1,53 @@
+From 281e3c0675ab259e37740487e7aedaee19465f2a Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:31:19 +0000
+Subject: [PATCH 5/6] dmaengine: give each dma_device its own debugfs directory
+
+TI EDMA registers two dma_devices (slave and memcpy) for the same
+struct device, so the second debugfs_create_dir() fails with
+"debugfs: Directory '49000000.dma' with parent 'dmaengine' already
+present!". If the name is already taken, append the unique dma_device
+id, e.g. "49000000.dma-dma1".
+---
+ drivers/dma/dmaengine.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma/dmaengine.c b/drivers/dma/dmaengine.c
+index e241b7b01..7cdf4509b 100644
+--- a/drivers/dma/dmaengine.c
++++ b/drivers/dma/dmaengine.c
+@@ -68,10 +68,29 @@ static struct dentry *rootdir;
+ 
+ static void dmaengine_debug_register(struct dma_device *dma_dev)
+ {
+-	dma_dev->dbg_dev_root = debugfs_create_dir(dev_name(dma_dev->dev),
+-						   rootdir);
++	const char *name = dev_name(dma_dev->dev);
++	struct dentry *d = debugfs_lookup(name, rootdir);
++	char *alt = NULL;
++
++	/*
++	 * A driver may register more than one dma_device for the same
++	 * struct device (TI EDMA registers a slave and a memcpy device).
++	 * Give the second one a unique directory instead of failing.
++	 */
++	if (d) {
++		dput(d);
++		alt = kasprintf(GFP_KERNEL, "%s-dma%d", name, dma_dev->dev_id);
++		if (!alt) {
++			dma_dev->dbg_dev_root = NULL;
++			return;
++		}
++		name = alt;
++	}
++
++	dma_dev->dbg_dev_root = debugfs_create_dir(name, rootdir);
+ 	if (IS_ERR(dma_dev->dbg_dev_root))
+ 		dma_dev->dbg_dev_root = NULL;
++	kfree(alt);
+ }
+ 
+ static void dmaengine_debug_unregister(struct dma_device *dma_dev)
+-- 
+2.43.0
+

@@ -1,0 +1,61 @@
+From c0b943f29fa927f6db583fb455d56b1f8d452f78 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:30:41 +0000
+Subject: [PATCH 1/6] bus: ti-sysc: add child clock lookups without the clkdev
+ name length limit
+
+Child devices of nested target-modules have names longer than the 24
+bytes clkdev_create() allows, e.g.
+"target-module@4b000000:target-module@140000:pmu@0". clkdev then logs
+"device ID is greater than 24" and stores a lookup that never matches,
+so clk_get(child, "fck") cannot find the clock.
+
+Allocate the clk_lookup directly and register it with clkdev_add(), as
+sysc_init_ext_opt_clock() already does, so the dev_id is not copied
+into a fixed-size buffer.
+---
+ drivers/bus/ti-sysc.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/bus/ti-sysc.c b/drivers/bus/ti-sysc.c
+index 382f7bc2e..f6b357ae2 100644
+--- a/drivers/bus/ti-sysc.c
++++ b/drivers/bus/ti-sysc.c
+@@ -16,6 +16,7 @@
+ 
+ #include <linux/io.h>
+ #include <linux/clk.h>
++#include <linux/clk-provider.h>
+ #include <linux/clkdev.h>
+ #include <linux/cpu_pm.h>
+ #include <linux/delay.h>
+@@ -2332,9 +2333,24 @@ static int sysc_child_add_named_clock(struct sysc *ddata,
+ 	if (IS_ERR(clk))
+ 		return -ENODEV;
+ 
+-	l = clkdev_create(clk, name, dev_name(child));
+-	if (!l)
++	/*
++	 * clkdev_create() copies dev_id into a 24-byte buffer, so child
++	 * device names such as "target-module@4b000000:target-module@140000:pmu@0"
++	 * do not fit: the lookup is replaced with "bad" and can never match.
++	 * Use clkdev_add() with the device name pointer instead, like
++	 * sysc_init_ext_opt_clock() does, which has no length limit.
++	 */
++	l = kzalloc(sizeof(*l), GFP_KERNEL);
++	if (!l) {
+ 		error = -ENOMEM;
++		goto put_clk;
++	}
++
++	l->con_id = name;
++	l->dev_id = dev_name(child);
++	/* store the clk_hw, not clk: clk is released by clk_put() below */
++	l->clk_hw = __clk_get_hw(clk);
++	clkdev_add(l);
+ put_clk:
+ 	clk_put(clk);
+ 
+-- 
+2.43.0
+

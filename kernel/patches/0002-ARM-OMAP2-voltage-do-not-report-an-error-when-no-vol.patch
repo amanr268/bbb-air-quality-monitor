@@ -1,0 +1,39 @@
+From f80f3c208325688fe99233ad965a7c658be90992 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:30:57 +0000
+Subject: [PATCH 2/6] ARM: OMAP2+: voltage: do not report an error when no
+ voltage domains exist
+
+AM33xx registers no OMAP voltage domains: the MPU voltage is controlled
+by the TPS65217 PMIC regulator via cpufreq-dt. omap_voltage_late_init()
+still runs and logs "Voltage driver support not added" at error level
+on every boot. Treat the empty list as the normal case.
+---
+ arch/arm/mach-omap2/voltage.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/mach-omap2/voltage.c b/arch/arm/mach-omap2/voltage.c
+index 49e8bc69a..1b594984b 100644
+--- a/arch/arm/mach-omap2/voltage.c
++++ b/arch/arm/mach-omap2/voltage.c
+@@ -237,10 +237,14 @@ int __init omap_voltage_late_init(void)
+ {
+ 	struct voltagedomain *voltdm;
+ 
++	/*
++	 * SoCs such as AM33xx register no voltage domains here: their CPU
++	 * voltage is scaled through the PMIC regulator by cpufreq-dt, so an
++	 * empty list is expected and not an error.
++	 */
+ 	if (list_empty(&voltdm_list)) {
+-		pr_err("%s: Voltage driver support not added\n",
+-			__func__);
+-		return -EINVAL;
++		pr_debug("%s: no voltage domains registered\n", __func__);
++		return 0;
+ 	}
+ 
+ 	list_for_each_entry(voltdm, &voltdm_list, node) {
+-- 
+2.43.0
+
