@@ -1,0 +1,52 @@
+From 91f14520b4f5f36ce67a0b58cdb86521443e5314 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:50 +0000
+Subject: [PATCH 13/13] wlcore: do not warn for normal wl18xx situations
+
+- With the default nvs file, wl18xx takes its MAC address from fuse,
+  which is the intended behaviour; report it once at info level
+  instead of two warnings.
+- When the firmware has no free RX block-ack session (the access point
+  asked for one on e.g. TID 6), the request is refused and traffic
+  continues without aggregation. Log that at debug level instead of a
+  warning every few seconds.
+---
+ drivers/net/wireless/ti/wlcore/acx.c  | 3 ++-
+ drivers/net/wireless/ti/wlcore/main.c | 5 +++--
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/wireless/ti/wlcore/acx.c b/drivers/net/wireless/ti/wlcore/acx.c
+index e820fe694..7bc8dd149 100644
+--- a/drivers/net/wireless/ti/wlcore/acx.c
++++ b/drivers/net/wireless/ti/wlcore/acx.c
+@@ -1434,7 +1434,8 @@ int wl12xx_acx_set_ba_receiver_session(struct wl1271 *wl, u8 tid_index,
+ 
+ 	/* sometimes we can't start the session */
+ 	if (ret == CMD_STATUS_NO_RX_BA_SESSION) {
+-		wl1271_warning("no fw rx ba on tid %d", tid_index);
++		/* firmware has no free RX BA slot; peer falls back to no BA */
++		wl1271_debug(DEBUG_ACX, "no fw rx ba on tid %d", tid_index);
+ 		ret = -EBUSY;
+ 		goto out;
+ 	}
+diff --git a/drivers/net/wireless/ti/wlcore/main.c b/drivers/net/wireless/ti/wlcore/main.c
+index da6db99b0..09d594529 100644
+--- a/drivers/net/wireless/ti/wlcore/main.c
++++ b/drivers/net/wireless/ti/wlcore/main.c
+@@ -6171,10 +6171,11 @@ static int wl1271_register_hw(struct wl1271 *wl)
+ 	}
+ 
+ 	if (oui_addr == 0xdeadbe && nic_addr == 0xef0000) {
+-		wl1271_warning("Detected unconfigured mac address in nvs, derive from fuse instead.");
+ 		if (!strcmp(pdev_data->family->name, "wl18xx")) {
+-			wl1271_warning("This default nvs file can be removed from the file system");
++			/* expected: wl18xx takes its MAC address from fuse */
++			wl1271_info("Default nvs MAC address, using the MAC address from fuse");
+ 		} else {
++			wl1271_warning("Detected unconfigured mac address in nvs, derive from fuse instead.");
+ 			wl1271_warning("Your device performance is not optimized.");
+ 			wl1271_warning("Please use the calibrator tool to configure your device.");
+ 		}
+-- 
+2.43.0
+

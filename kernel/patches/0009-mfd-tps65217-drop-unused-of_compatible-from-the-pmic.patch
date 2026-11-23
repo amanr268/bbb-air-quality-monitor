@@ -1,0 +1,39 @@
+From 5daf338d29bffe99aa1fb661790f1e4538290395 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:50 +0000
+Subject: [PATCH 09/13] mfd: tps65217: drop unused of_compatible from the pmic
+ and bl cells
+
+No DT binding has nodes with compatible "ti,tps65217-pmic" or
+"ti,tps65217-bl": the regulator driver reads the "regulators" child and
+the backlight driver the "backlight" child of the TPS65217 node itself.
+mfd-core therefore never finds a match and warns "tps65217-pmic: Failed
+to locate of_node [id: -1]" (and the same for tps65217-bl) on every
+boot. Remove the two strings; the devices bind by name exactly as
+before.
+---
+ drivers/mfd/tps65217.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mfd/tps65217.c b/drivers/mfd/tps65217.c
+index 029ecc32f..c178533a6 100644
+--- a/drivers/mfd/tps65217.c
++++ b/drivers/mfd/tps65217.c
+@@ -79,12 +79,12 @@ static struct irq_chip tps65217_irq_chip = {
+ 
+ static struct mfd_cell tps65217s[] = {
+ 	{
++		/* uses the "regulators" child of the parent node */
+ 		.name = "tps65217-pmic",
+-		.of_compatible = "ti,tps65217-pmic",
+ 	},
+ 	{
++		/* uses the "backlight" child of the parent node */
+ 		.name = "tps65217-bl",
+-		.of_compatible = "ti,tps65217-bl",
+ 	},
+ 	{
+ 		.name = "tps65217-charger",
+-- 
+2.43.0
+

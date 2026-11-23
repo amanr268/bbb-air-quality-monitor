@@ -1,0 +1,39 @@
+From 05e9625ce11a09fba88e0d413263b6b0d8ee38ef Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:49 +0000
+Subject: [PATCH 08/13] usb: phy: generic: only request the vbus regulator when
+ the DT has one
+
+The vbus supply is optional (-ENODEV is accepted), but the exclusive
+lookup makes the regulator core warn "dummy supplies not allowed for
+exclusive requests (id=vbus)" for every PHY without a vbus-supply, e.g.
+both AM335x USB PHYs on the BeagleBone. Check for the property first;
+behaviour is otherwise unchanged.
+---
+ drivers/usb/phy/phy-generic.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/phy/phy-generic.c b/drivers/usb/phy/phy-generic.c
+index aadf98f65..ede71da9d 100644
+--- a/drivers/usb/phy/phy-generic.c
++++ b/drivers/usb/phy/phy-generic.c
+@@ -256,7 +256,15 @@ int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_generic *nop)
+ 		return dev_err_probe(dev, PTR_ERR(nop->vcc),
+ 				     "could not get vcc regulator\n");
+ 
+-	nop->vbus_draw = devm_regulator_get_exclusive(dev, "vbus");
++	/*
++	 * An exclusive get of a supply the DT does not describe makes the
++	 * regulator core log "dummy supplies not allowed for exclusive
++	 * requests" before returning -ENODEV. Only ask when it exists.
++	 */
++	if (device_property_present(dev, "vbus-supply"))
++		nop->vbus_draw = devm_regulator_get_exclusive(dev, "vbus");
++	else
++		nop->vbus_draw = ERR_PTR(-ENODEV);
+ 	if (PTR_ERR(nop->vbus_draw) == -ENODEV)
+ 		nop->vbus_draw = NULL;
+ 	if (IS_ERR(nop->vbus_draw))
+-- 
+2.43.0
+

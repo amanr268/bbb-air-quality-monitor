@@ -1,0 +1,27 @@
+From 3a9bbcbee621d9232a4a25f7aa051edfd9de4e2b Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:50 +0000
+Subject: [PATCH 12/13] dm: report the IMA hash-table setting as info
+
+The message only describes how IMA is configured; nothing is wrong.
+Print it at info level instead of as a warning on every boot.
+---
+ drivers/md/dm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index 20f6c6eba..e96c29ca9 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -272,7 +272,7 @@ static int __init dm_init(void)
+ 	int r, i;
+ 
+ #if (IS_ENABLED(CONFIG_IMA) && !IS_ENABLED(CONFIG_IMA_DISABLE_HTABLE))
+-	DMWARN("CONFIG_IMA_DISABLE_HTABLE is disabled."
++	DMINFO("CONFIG_IMA_DISABLE_HTABLE is disabled."
+ 	       " Duplicate IMA measurements will not be recorded in the IMA log.");
+ #endif
+ 
+-- 
+2.43.0
+

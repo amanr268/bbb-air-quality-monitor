@@ -1,0 +1,42 @@
+From 4f879fcccec4139df0d14a3b261280d7071bd441 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:49 +0000
+Subject: [PATCH 07/13] mmc: sdhci-omap: look up pbias/vqmmc without creating
+ dummy regulators
+
+sdhci_omap_regulator_get_caps() uses regulator_get(), so on boards whose
+DT has no pbias-supply / vqmmc-supply (AM335x BeagleBone) the regulator
+core logs "supply pbias not found, using dummy regulator" twice per MMC
+controller. The dummy reports no voltage, which the capability checks
+treat as "1.8 V, 3.0 V and 3.3 V supported".
+
+Use regulator_get_optional() and return that same capability set when
+the supply is absent, so the result is unchanged and nothing is logged.
+---
+ drivers/mmc/host/sdhci-omap.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mmc/host/sdhci-omap.c b/drivers/mmc/host/sdhci-omap.c
+index ea4a801c9..2cb9ccaa2 100644
+--- a/drivers/mmc/host/sdhci-omap.c
++++ b/drivers/mmc/host/sdhci-omap.c
+@@ -945,7 +945,15 @@ static unsigned int sdhci_omap_regulator_get_caps(struct device *dev,
+ 	struct regulator *reg;
+ 	unsigned int caps = 0;
+ 
+-	reg = regulator_get(dev, name);
++	/*
++	 * Use the optional lookup: regulator_get() hands out a dummy
++	 * regulator (and logs "supply ... not found") when the DT has no
++	 * supply. A dummy reports no voltage, which the checks below treat
++	 * as "all voltages supported", so keep that result here.
++	 */
++	reg = regulator_get_optional(dev, name);
++	if (PTR_ERR(reg) == -ENODEV)
++		return SDHCI_CAN_VDD_180 | SDHCI_CAN_VDD_300 | SDHCI_CAN_VDD_330;
+ 	if (IS_ERR(reg))
+ 		return ~0U;
+ 
+-- 
+2.43.0
+

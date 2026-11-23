@@ -1,0 +1,375 @@
+From ffc2ba23dd8e05a818cb0f1555dcb20fcf83cf15 Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:35:57 +0000
+Subject: [PATCH] Kernel: 6 patches for a clean boot log; power button: hold 5
+ s to power off
+
+- kernel/patches: fix the clkdev name-length bug in ti-sysc and stop
+  logging harmless start-up steps as errors (voltage domains, wkup_m3
+  deferral, rtc-only, EDMA debugfs, sync-state-only device links)
+- config/logind-aqm-power.conf: a short tap is ignored, a 5 s hold
+  powers off. A glitch on the button line powered the board off at
+  04:17 on 2026-11-23.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FevFi6EsoDgsQbJXyzXSq8
+---
+ config/logind-aqm-power.conf                  |  8 +++
+ ...child-clock-lookups-without-the-clkd.patch | 61 +++++++++++++++++++
+ ...e-do-not-report-an-error-when-no-vol.patch | 39 ++++++++++++
+ ...-not-log-an-error-while-waiting-for-.patch | 37 +++++++++++
+ ...port-missing-rtc-only-bootloader-sup.patch | 30 +++++++++
+ ...ach-dma_device-its-own-debugfs-direc.patch | 53 ++++++++++++++++
+ ...evlink-do-not-log-an-error-for-skipp.patch | 43 +++++++++++++
+ kernel/patches/README.md                      | 19 ++++++
+ 8 files changed, 290 insertions(+)
+ create mode 100644 config/logind-aqm-power.conf
+ create mode 100644 kernel/patches/0001-bus-ti-sysc-add-child-clock-lookups-without-the-clkd.patch
+ create mode 100644 kernel/patches/0002-ARM-OMAP2-voltage-do-not-report-an-error-when-no-vol.patch
+ create mode 100644 kernel/patches/0003-soc-ti-pm33xx-do-not-log-an-error-while-waiting-for-.patch
+ create mode 100644 kernel/patches/0004-soc-ti-pm33xx-report-missing-rtc-only-bootloader-sup.patch
+ create mode 100644 kernel/patches/0005-dmaengine-give-each-dma_device-its-own-debugfs-direc.patch
+ create mode 100644 kernel/patches/0006-driver-core-fw_devlink-do-not-log-an-error-for-skipp.patch
+ create mode 100644 kernel/patches/README.md
+
+diff --git a/config/logind-aqm-power.conf b/config/logind-aqm-power.conf
+new file mode 100644
+index 0000000..b3480c0
+--- /dev/null
++++ b/config/logind-aqm-power.conf
+@@ -0,0 +1,8 @@
++# Installed as /etc/systemd/logind.conf.d/aqm-power.conf
++# A short tap of the power button no longer powers the board off:
++# a glitch on the button line did exactly that on 2026-11-23 at 04:17.
++# Hold the button for ~5 s to power off. Power-on is still one tap
++# (the TPS65217 PMIC handles that in hardware).
++[Login]
++HandlePowerKey=ignore
++HandlePowerKeyLongPress=poweroff
+diff --git a/kernel/patches/0001-bus-ti-sysc-add-child-clock-lookups-without-the-clkd.patch b/kernel/patches/0001-bus-ti-sysc-add-child-clock-lookups-without-the-clkd.patch
+new file mode 100644
+index 0000000..e1730c8
+--- /dev/null
++++ b/kernel/patches/0001-bus-ti-sysc-add-child-clock-lookups-without-the-clkd.patch
+@@ -0,0 +1,61 @@
++From c0b943f29fa927f6db583fb455d56b1f8d452f78 Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:30:41 +0000
++Subject: [PATCH 1/6] bus: ti-sysc: add child clock lookups without the clkdev
++ name length limit
++
++Child devices of nested target-modules have names longer than the 24
++bytes clkdev_create() allows, e.g.
++"target-module@4b000000:target-module@140000:pmu@0". clkdev then logs
++"device ID is greater than 24" and stores a lookup that never matches,
++so clk_get(child, "fck") cannot find the clock.
++
++Allocate the clk_lookup directly and register it with clkdev_add(), as
++sysc_init_ext_opt_clock() already does, so the dev_id is not copied
++into a fixed-size buffer.
++---
++ drivers/bus/ti-sysc.c | 20 ++++++++++++++++++--
++ 1 file changed, 18 insertions(+), 2 deletions(-)
++
++diff --git a/drivers/bus/ti-sysc.c b/drivers/bus/ti-sysc.c
++index 382f7bc2e..f6b357ae2 100644
++--- a/drivers/bus/ti-sysc.c
+++++ b/drivers/bus/ti-sysc.c
++@@ -16,6 +16,7 @@
++ 
++ #include <linux/io.h>
++ #include <linux/clk.h>
+++#include <linux/clk-provider.h>
++ #include <linux/clkdev.h>
++ #include <linux/cpu_pm.h>
++ #include <linux/delay.h>
++@@ -2332,9 +2333,24 @@ static int sysc_child_add_named_clock(struct sysc *ddata,
++ 	if (IS_ERR(clk))
++ 		return -ENODEV;
++ 
++-	l = clkdev_create(clk, name, dev_name(child));
++-	if (!l)
+++	/*
+++	 * clkdev_create() copies dev_id into a 24-byte buffer, so child
+++	 * device names such as "target-module@4b000000:target-module@140000:pmu@0"
+++	 * do not fit: the lookup is replaced with "bad" and can never match.
+++	 * Use clkdev_add() with the device name pointer instead, like
+++	 * sysc_init_ext_opt_clock() does, which has no length limit.
+++	 */
+++	l = kzalloc(sizeof(*l), GFP_KERNEL);
+++	if (!l) {
++ 		error = -ENOMEM;
+++		goto put_clk;
+++	}
+++
+++	l->con_id = name;
+++	l->dev_id = dev_name(child);
+++	/* store the clk_hw, not clk: clk is released by clk_put() below */
+++	l->clk_hw = __clk_get_hw(clk);
+++	clkdev_add(l);
++ put_clk:
++ 	clk_put(clk);
++ 
++-- 
++2.43.0
++
+diff --git a/kernel/patches/0002-ARM-OMAP2-voltage-do-not-report-an-error-when-no-vol.patch b/kernel/patches/0002-ARM-OMAP2-voltage-do-not-report-an-error-when-no-vol.patch
+new file mode 100644
+index 0000000..c2e6f05
+--- /dev/null
++++ b/kernel/patches/0002-ARM-OMAP2-voltage-do-not-report-an-error-when-no-vol.patch
+@@ -0,0 +1,39 @@
++From f80f3c208325688fe99233ad965a7c658be90992 Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:30:57 +0000
++Subject: [PATCH 2/6] ARM: OMAP2+: voltage: do not report an error when no
++ voltage domains exist
++
++AM33xx registers no OMAP voltage domains: the MPU voltage is controlled
++by the TPS65217 PMIC regulator via cpufreq-dt. omap_voltage_late_init()
++still runs and logs "Voltage driver support not added" at error level
++on every boot. Treat the empty list as the normal case.
++---
++ arch/arm/mach-omap2/voltage.c | 10 +++++++---
++ 1 file changed, 7 insertions(+), 3 deletions(-)
++
++diff --git a/arch/arm/mach-omap2/voltage.c b/arch/arm/mach-omap2/voltage.c
++index 49e8bc69a..1b594984b 100644
++--- a/arch/arm/mach-omap2/voltage.c
+++++ b/arch/arm/mach-omap2/voltage.c
++@@ -237,10 +237,14 @@ int __init omap_voltage_late_init(void)
++ {
++ 	struct voltagedomain *voltdm;
++ 
+++	/*
+++	 * SoCs such as AM33xx register no voltage domains here: their CPU
+++	 * voltage is scaled through the PMIC regulator by cpufreq-dt, so an
+++	 * empty list is expected and not an error.
+++	 */
++ 	if (list_empty(&voltdm_list)) {
++-		pr_err("%s: Voltage driver support not added\n",
++-			__func__);
++-		return -EINVAL;
+++		pr_debug("%s: no voltage domains registered\n", __func__);
+++		return 0;
++ 	}
++ 
++ 	list_for_each_entry(voltdm, &voltdm_list, node) {
++-- 
++2.43.0
++
+diff --git a/kernel/patches/0003-soc-ti-pm33xx-do-not-log-an-error-while-waiting-for-.patch b/kernel/patches/0003-soc-ti-pm33xx-do-not-log-an-error-while-waiting-for-.patch
+new file mode 100644
+index 0000000..c1fdaa0
+--- /dev/null
++++ b/kernel/patches/0003-soc-ti-pm33xx-do-not-log-an-error-while-waiting-for-.patch
+@@ -0,0 +1,37 @@
++From a7e5326673c4bf45e8a63e1081a8f49122b2703c Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:31:04 +0000
++Subject: [PATCH 3/6] soc: ti: pm33xx: do not log an error while waiting for
++ wkup_m3_ipc
++
++wkup_m3_ipc only becomes available after remoteproc has booted the CM3
++firmware, so the first probe(s) of am33xx-pm are normally deferred.
++Each deferral logged "PM: Cannot get wkup_m3_ipc handle" at error
++level although the driver then probes fine. Use dev_err_probe(), which
++records the deferral reason without printing an error.
++---
++ drivers/soc/ti/pm33xx.c | 8 ++++----
++ 1 file changed, 4 insertions(+), 4 deletions(-)
++
++diff --git a/drivers/soc/ti/pm33xx.c b/drivers/soc/ti/pm33xx.c
++index dc52a2197..3da0d7c1f 100644
++--- a/drivers/soc/ti/pm33xx.c
+++++ b/drivers/soc/ti/pm33xx.c
++@@ -508,10 +508,10 @@ static int am33xx_pm_probe(struct platform_device *pdev)
++ 	}
++ 
++ 	m3_ipc = wkup_m3_ipc_get();
++-	if (!m3_ipc) {
++-		pr_err("PM: Cannot get wkup_m3_ipc handle\n");
++-		return -EPROBE_DEFER;
++-	}
+++	if (!m3_ipc)
+++		/* wkup_m3 firmware not booted yet: normal, retry later */
+++		return dev_err_probe(dev, -EPROBE_DEFER,
+++				     "PM: wkup_m3_ipc handle not ready\n");
++ 
++ 	pm33xx_dev = dev;
++ 
++-- 
++2.43.0
++
+diff --git a/kernel/patches/0004-soc-ti-pm33xx-report-missing-rtc-only-bootloader-sup.patch b/kernel/patches/0004-soc-ti-pm33xx-report-missing-rtc-only-bootloader-sup.patch
+new file mode 100644
+index 0000000..f5c0318
+--- /dev/null
++++ b/kernel/patches/0004-soc-ti-pm33xx-report-missing-rtc-only-bootloader-sup.patch
+@@ -0,0 +1,30 @@
++From f92fd99736f61fd8dfbd2b9a32a4eb787733d256 Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:31:05 +0000
++Subject: [PATCH 4/6] soc: ti: pm33xx: report missing rtc-only bootloader
++ support as info
++
++rtc-only is an optional deep-sleep mode that needs matching bootloader
++support. When the bootloader does not provide it, the mode is simply
++not used and normal suspend still works, so this is not a fault. Log it
++at info level instead of as a warning on every boot.
++---
++ drivers/soc/ti/pm33xx.c | 2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++diff --git a/drivers/soc/ti/pm33xx.c b/drivers/soc/ti/pm33xx.c
++index 3da0d7c1f..613b24aca 100644
++--- a/drivers/soc/ti/pm33xx.c
+++++ b/drivers/soc/ti/pm33xx.c
++@@ -458,7 +458,7 @@ static int am33xx_pm_rtc_setup(void)
++ 			nvmem_device_read(nvmem, RTC_SCRATCH_MAGIC_REG * 4,
++ 					  4, (void *)&rtc_magic_val);
++ 			if ((rtc_magic_val & 0xffff) != RTC_REG_BOOT_MAGIC)
++-				pr_warn("PM: bootloader does not support rtc-only!\n");
+++				pr_info("PM: bootloader does not support rtc-only mode\n");
++ 
++ 			nvmem_device_write(nvmem, RTC_SCRATCH_MAGIC_REG * 4,
++ 					   4, (void *)&val);
++-- 
++2.43.0
++
+diff --git a/kernel/patches/0005-dmaengine-give-each-dma_device-its-own-debugfs-direc.patch b/kernel/patches/0005-dmaengine-give-each-dma_device-its-own-debugfs-direc.patch
+new file mode 100644
+index 0000000..6e87d17
+--- /dev/null
++++ b/kernel/patches/0005-dmaengine-give-each-dma_device-its-own-debugfs-direc.patch
+@@ -0,0 +1,53 @@
++From 281e3c0675ab259e37740487e7aedaee19465f2a Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:31:19 +0000
++Subject: [PATCH 5/6] dmaengine: give each dma_device its own debugfs directory
++
++TI EDMA registers two dma_devices (slave and memcpy) for the same
++struct device, so the second debugfs_create_dir() fails with
++"debugfs: Directory '49000000.dma' with parent 'dmaengine' already
++present!". If the name is already taken, append the unique dma_device
++id, e.g. "49000000.dma-dma1".
++---
++ drivers/dma/dmaengine.c | 23 +++++++++++++++++++++--
++ 1 file changed, 21 insertions(+), 2 deletions(-)
++
++diff --git a/drivers/dma/dmaengine.c b/drivers/dma/dmaengine.c
++index e241b7b01..7cdf4509b 100644
++--- a/drivers/dma/dmaengine.c
+++++ b/drivers/dma/dmaengine.c
++@@ -68,10 +68,29 @@ static struct dentry *rootdir;
++ 
++ static void dmaengine_debug_register(struct dma_device *dma_dev)
++ {
++-	dma_dev->dbg_dev_root = debugfs_create_dir(dev_name(dma_dev->dev),
++-						   rootdir);
+++	const char *name = dev_name(dma_dev->dev);
+++	struct dentry *d = debugfs_lookup(name, rootdir);
+++	char *alt = NULL;
+++
+++	/*
+++	 * A driver may register more than one dma_device for the same
+++	 * struct device (TI EDMA registers a slave and a memcpy device).
+++	 * Give the second one a unique directory instead of failing.
+++	 */
+++	if (d) {
+++		dput(d);
+++		alt = kasprintf(GFP_KERNEL, "%s-dma%d", name, dma_dev->dev_id);
+++		if (!alt) {
+++			dma_dev->dbg_dev_root = NULL;
+++			return;
+++		}
+++		name = alt;
+++	}
+++
+++	dma_dev->dbg_dev_root = debugfs_create_dir(name, rootdir);
++ 	if (IS_ERR(dma_dev->dbg_dev_root))
++ 		dma_dev->dbg_dev_root = NULL;
+++	kfree(alt);
++ }
++ 
++ static void dmaengine_debug_unregister(struct dma_device *dma_dev)
++-- 
++2.43.0
++
+diff --git a/kernel/patches/0006-driver-core-fw_devlink-do-not-log-an-error-for-skipp.patch b/kernel/patches/0006-driver-core-fw_devlink-do-not-log-an-error-for-skipp.patch
+new file mode 100644
+index 0000000..fde8a44
+--- /dev/null
++++ b/kernel/patches/0006-driver-core-fw_devlink-do-not-log-an-error-for-skipp.patch
+@@ -0,0 +1,43 @@
++From c1a5dd5f55f4589c34f628a64b460783e666ec03 Mon Sep 17 00:00:00 2001
++From: Amandeep Singh <amanr268@users.noreply.github.com>
++Date: Mon, 23 Nov 2026 17:31:20 +0000
++Subject: [PATCH 6/6] driver core: fw_devlink: do not log an error for skipped
++ sync-state-only links
++
++device_link_add() deliberately refuses SYNC_STATE_ONLY links when the
++consumer has already probed, because such links only matter until
++then. On AM335x the ti-sysc system timers (44e31000, 48040000) probe
++early, so fw_devlink logs "Failed to create device link (0x180) with
++ocp" on every boot although nothing is wrong. Log that case at debug
++level; real link failures are still reported as errors.
++---
++ drivers/base/core.c | 13 +++++++++++--
++ 1 file changed, 11 insertions(+), 2 deletions(-)
++
++diff --git a/drivers/base/core.c b/drivers/base/core.c
++index 2e1cce626..b3f801e19 100644
++--- a/drivers/base/core.c
+++++ b/drivers/base/core.c
++@@ -2237,8 +2237,17 @@ static int fw_devlink_create_devlink(struct device *con,
++ 		}
++ 
++ 		if (con != sup_dev && !device_link_add(con, sup_dev, flags)) {
++-			dev_err(con, "Failed to create device link (0x%x) with %s\n",
++-				flags, dev_name(sup_dev));
+++			/*
+++			 * SYNC_STATE_ONLY links are intentionally not created
+++			 * once the consumer has probed (see device_link_add()),
+++			 * e.g. for early system timers, so that is not an error.
+++			 */
+++			if (flags & DL_FLAG_SYNC_STATE_ONLY)
+++				dev_dbg(con, "Not creating sync-state-only link (0x%x) with %s\n",
+++					flags, dev_name(sup_dev));
+++			else
+++				dev_err(con, "Failed to create device link (0x%x) with %s\n",
+++					flags, dev_name(sup_dev));
++ 			ret = -EINVAL;
++ 		}
++ 
++-- 
++2.43.0
++
+diff --git a/kernel/patches/README.md b/kernel/patches/README.md
+new file mode 100644
+index 0000000..a2fdcf6
+--- /dev/null
++++ b/kernel/patches/README.md
+@@ -0,0 +1,19 @@
++# Kernel patches (6.12.111-bone-rt-r73)
++
++Applied on top of the `6.12.111-bone-rt-r73` tag of
++https://github.com/RobertCNelson/linux-stable-rcn-ee. Each one removes a
++boot-log error or warning that was harmless but printed on every boot.
++
++| Patch | Boot message it removes |
++|---|---|
++| 0001 ti-sysc clkdev | `...pmu@0:fck: device ID is greater than 24` (also makes that clock lookup work) |
++| 0002 OMAP2+ voltage | `omap_voltage_late_init: Voltage driver support not added` |
++| 0003 pm33xx defer | `PM: Cannot get wkup_m3_ipc handle` |
++| 0004 pm33xx rtc-only | `PM: bootloader does not support rtc-only!` (now info) |
++| 0005 dmaengine debugfs | `debugfs: Directory '49000000.dma' ... already present!` |
++| 0006 fw_devlink | `ti-sysc 44e31000/48040000: Failed to create device link (0x180) with ocp` |
++
++Rebuild only the zImage (all changed code is built in; modules unchanged):
++
++    git am kernel/patches/00*.patch
++    make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- LOCALVERSION=-bone-rt-r73 zImage
+-- 
+2.43.0
+

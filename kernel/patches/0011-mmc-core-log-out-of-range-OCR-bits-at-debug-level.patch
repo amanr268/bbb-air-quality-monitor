@@ -1,0 +1,28 @@
+From 943eaac7c6e4eb3acd3edba135f907b6881edb7a Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:50 +0000
+Subject: [PATCH 11/13] mmc: core: log out-of-range OCR bits at debug level
+
+Some SDIO cards (e.g. the TI WL1835 on the BeagleBone Black Wireless)
+set OCR bits below 2.0 V. The core already masks those bits and carries
+on, so this is informational, not a warning.
+---
+ drivers/mmc/core/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 327029f5c..85db8c9ab 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -1121,7 +1121,7 @@ u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
+ 	 * support.
+ 	 */
+ 	if (ocr & 0x7F) {
+-		dev_warn(mmc_dev(host),
++		dev_dbg(mmc_dev(host),
+ 		"card claims to support voltages below defined range\n");
+ 		ocr &= ~0x7F;
+ 	}
+-- 
+2.43.0
+

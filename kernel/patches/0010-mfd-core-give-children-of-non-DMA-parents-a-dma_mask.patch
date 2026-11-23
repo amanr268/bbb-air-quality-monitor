@@ -1,0 +1,36 @@
+From b1e86d889cce27ea016e2859a67cab39bfd9a48f Mon Sep 17 00:00:00 2001
+From: Amandeep Singh <amanr268@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 17:53:50 +0000
+Subject: [PATCH 10/13] mfd: core: give children of non-DMA parents a dma_mask
+ pointer
+
+An MFD child of an I2C device inherits a NULL dma_mask. When the child
+has a DT node, of_dma_configure() then warns "DMA mask not set" (seen
+for tps65217-pwrbutton) and points dma_mask at coherent_dma_mask.
+Set that pointer when the device is created, so the end result is the
+same without the warning.
+---
+ drivers/mfd/mfd-core.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/mfd/mfd-core.c b/drivers/mfd/mfd-core.c
+index 256058a6e..58b10f585 100644
+--- a/drivers/mfd/mfd-core.c
++++ b/drivers/mfd/mfd-core.c
+@@ -187,6 +187,13 @@ static int mfd_add_device(struct device *parent, int id,
+ 	pdev->dev.dma_mask = parent->dma_mask;
+ 	pdev->dev.dma_parms = parent->dma_parms;
+ 	pdev->dev.coherent_dma_mask = parent->coherent_dma_mask;
++	/*
++	 * Children of non-DMA parents (I2C/SPI PMICs) have no dma_mask;
++	 * of_dma_configure() would set it to the coherent mask anyway, but
++	 * only after warning "DMA mask not set". Do it here, quietly.
++	 */
++	if (!pdev->dev.dma_mask)
++		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
+ 
+ 	ret = regulator_bulk_register_supply_alias(
+ 			&pdev->dev, cell->parent_supplies,
+-- 
+2.43.0
+
