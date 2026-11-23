@@ -57,7 +57,10 @@ pms=$(grep 'PMS5003:' <<<"$j" | tail -1); aht=$(grep 'AHT21:' <<<"$j" | tail -1)
 [ -n "$pms" ] && { grep -q ' 0 bad checksum' <<<"$pms" && pass "PMS5003 ${pms##*PMS5003: }" || warn "PMS5003 ${pms##*PMS5003: }"; } || fail "no PMS5003 log in the last 60 s"
 [ -n "$aht" ] && { grep -q '0 bad CRC, 0 bus errors' <<<"$aht" && pass "AHT21 ${aht##*AHT21: }" || warn "AHT21 ${aht##*AHT21: }"; } || fail "no AHT21 log in the last 60 s"
 if [ -n "$ens" ]; then
-    grep -q 'valid' <<<"$ens" && pass "ENS160 ${ens##*ENS160: }" || warn "ENS160 not 'valid' yet (warm-up ~3 min): ${ens##*ENS160: }"
+    if grep -qi "invalid" <<<"$ens"; then warn "ENS160 reports INVALID output: ${ens##*ENS160: }"
+    elif grep -qiE "warm|initial" <<<"$ens"; then pass "ENS160 warming up (normal after power-on): ${ens##*ENS160: }"
+    elif grep -q "valid" <<<"$ens"; then pass "ENS160 ${ens##*ENS160: }"
+    else warn "ENS160 status unknown: ${ens##*ENS160: }"; fi
 else fail "no ENS160 log in the last 60 s"; fi
 grep -qi 'simulated' <<<"$j" && warn "a sensor reports SIMULATED data" || pass "no simulated sensor data"
 st=$(journalctl -u aqm --since "-24 h" --no-pager -q -o cat | grep -c 'ENS160 stalled')
