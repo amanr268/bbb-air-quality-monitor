@@ -11,7 +11,7 @@ typedef struct {
     const void *bits;          /* [last-first+1][h] rows          */
 } aqm_font_t;
 
-extern const aqm_font_t font_6_10;    /* body text: 21 chars x 6 lines  */
+extern const aqm_font_t font_6_10;    /* body text: 21 chars x 6 lines; "\x7f" = ohm sign */
 extern const aqm_font_t font_10_20;   /* big numbers                    */
 
 #endif

@@ -139,6 +139,12 @@ public class MainActivity extends Activity implements Mqtt.Listener {
 
         root.addView(section("Averages", avgTable(), kv("aqi24", "24 h AQI")));
 
+        /* software faults from the board (aqm/bbb-aqi/alerts, retained): overlay,
+         * ENS160 stalls, pipeline restarts. Hardware faults are on the OLED. */
+        TextView aItems = text("Waiting for the board…", 14, DIM, false);
+        v.put("a_items", aItems);
+        root.addView(section("System alerts", aItems));
+
         root.addView(section("Sensors",
                 kv("s_pms", "PMS5003  (particles)"),
                 kv("s_ens", "ENS160  (TVOC / eCO₂)"),
@@ -148,7 +154,7 @@ public class MainActivity extends Activity implements Mqtt.Listener {
         TextView hItems = text("", 14, Color.WHITE, false);
         hItems.setPadding(0, dp(6), 0, 0);
         v.put("h_items", hItems);
-        root.addView(section("Board health (daily self-test)",
+        root.addView(section("Board health (self-test)",
                 kv("h_res", "Result"),
                 kv("h_when", "Last run"),
                 hItems));
@@ -286,6 +292,7 @@ public class MainActivity extends Activity implements Mqtt.Listener {
                         case "alarm":  onAlarm(new JSONObject(payload)); break;
                         case "health": onHealth(new JSONObject(payload)); break;
                         case "oled":   onOled(new JSONObject(payload)); break;
+                        case "alerts": onAlerts(new JSONObject(payload)); break;
                         case "status": boardStatus = payload.trim(); showLink(); break;
                         default: break;
                     }
@@ -464,6 +471,24 @@ public class MainActivity extends Activity implements Mqtt.Listener {
         }
         set("h_items", sb.length() > 0 ? sb.toString() : "No warnings or failures.",
                 fail > 0 ? BAD : warn > 0 ? WARN : DIM);
+    }
+
+    /* {"ts":..., "items":[{"title":"...","text":"..."}]}: empty = all good */
+    private void onAlerts(JSONObject j) {
+        JSONArray items = j.optJSONArray("items");
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject it = items.optJSONObject(i);
+            if (it == null) continue;
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("⚠ ").append(it.optString("title")).append("\n")
+              .append(it.optString("text"));
+        }
+        if (sb.length() > 0)
+            set("a_items", sb.toString(), WARN);
+        else
+            set("a_items", "No software faults.", OK);
     }
 
     private void onAlarm(JSONObject j) {

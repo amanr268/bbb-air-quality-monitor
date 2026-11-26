@@ -87,7 +87,7 @@ typedef struct {
     int          contrast_sent;       /* brightness the panel has, -1 = unknown    */
     int          oled_pub;            /* OLED state changed: publish it            */
     int64_t      oled_pub_ns;         /* last time the state was published         */
-    int64_t      fault_since_ns[5];   /* when each fault began, 0 = OK             */
+    int64_t      fault_since_ns[4];   /* when each fault began, 0 = OK             */
     uint32_t     fault_mask;          /* AQM_ST_* faults shown on the ticker       */
     char         ticker[320];         /* the scrolling fault message               */
     int          ticker_x;            /* its current x position                    */
@@ -96,6 +96,15 @@ typedef struct {
     int64_t      pms_bytes_ns, pms_frames_ns; /* ... and when they last changed    */
     int          acc_fail, acc_fault; /* ADXL345 reads failing in a row / fault     */
     char         crash[96];           /* last pipeline crash, "" = none            */
+    char         crash_long[200];     /* the same, explained (for the phone app)   */
+    /* software faults go to the phone app (MQTT <topic>/alerts, retained) */
+    char         alerts[2048];        /* JSON of the current alerts                */
+    char         alerts_sent[2048];   /* last published                            */
+    int64_t      alerts_ns;           /* last publish                              */
+    char         diag[480];           /* overlay / I2C diagnosis (cached)          */
+    int64_t      diag_ns;
+    uint32_t     stalls_seen;         /* ENS160 stall count last seen ...          */
+    int64_t      stall_t;             /* ... and the wall time of the last one     */
     int64_t      crash_t;             /* its wall-clock time                       */
     int          nfaults;             /* fault pages (one per fault)               */
     char         ftitle[MAX_FAULTS][28];
@@ -111,17 +120,14 @@ typedef struct {
 /* ticker lines; the first three are the sample's AQM_ST_* bits, the others
  * are found by report itself */
 #define F_ACC    (1u << 8)            /* ADXL345 not answering                  */
-#define F_CRASH  (1u << 9)            /* pipeline restarted after a crash (10 min) */
-#define CRASH_TICKER_S  600
 static const struct {
     uint32_t    bit;
     const char *msg;
-} g_faults[5] = {
+} g_faults[4] = {
     { AQM_ST_PMS_FAULT, "PM2.5/PM10 SENSOR (PMS5003) NOT WORKING" },
     { AQM_ST_ENS_FAULT, "TVOC/eCO2 SENSOR (ENS160) NOT WORKING" },
     { AQM_ST_AHT_FAULT, "TEMP/HUMIDITY SENSOR (AHT21) NOT WORKING" },
     { F_ACC,            "ACCELEROMETER (ADXL345) NOT WORKING" },
-    { F_CRASH,          "SYSTEM RESTARTED AFTER A CRASH" },
 };
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
@@ -311,27 +317,42 @@ static int i2c_nack(int e)  { return e == EREMOTEIO || e == ENXIO; }
 static int i2c_bus(int e)   { return e == ETIMEDOUT || e == EAGAIN || e == EIO; }
 static int i2c_dev_bad(int e) { return e == ENOENT || e == ENODEV || e == EACCES || e == EPERM; }
 
+/* an errno in a few plain words (fits one 21-character line) */
+static const char *i2c_words(int e)
+{
+    switch (e) {
+    case ETIMEDOUT: return "bus timeout";
+    case EAGAIN:    return "bus busy / noise";
+    case EIO:       return "transfer failed";
+    case EREMOTEIO:
+    case ENXIO:     return "no answer";
+    case EINVAL:    return "bad request";
+    default:        return "unknown";
+    }
+}
+
 /* Fault page texts: shorthand, one fact per line, at most 5 lines of at
  * most 21 characters (landscape); portrait wraps them to 10 characters.
  * "->" = goes to / check this wire, "X" = not working. */
-#define I2C_WIRES "SDA->P9.20\nSCL->P9.19\nVIN->P9.3 3.3V\nGND->P9.1"
+#define I2C_WIRES "SDA->P9.20\nSCL->P9.19\nVIN->P9.3 (3.3V)\nGND->P9.1"
+#define SW_FAULT  "Software fault\nSee phone app"
 
 /* one I2C chip on the ENS160+AHT21 module; partner_ok = the other chip works */
-static void i2c_fault(display_t *dp, const char *title, int e, int partner_ok,
-                      const char *partner)
+static void i2c_fault(display_t *dp, const char *title, const char *chip, int e,
+                      int partner_ok, const char *partner)
 {
     if (i2c_nack(e) && partner_ok)
-        add_fault(dp, title, "No answer\n%s OK = wires OK\nVIN off 10s\nStill X? chip bad",
-                  partner);
+        add_fault(dp, title, "No answer\n%s works, so\nwires are fine\n"
+                  "Unplug VIN (P9.3) 10s\nStill X? %s bad", partner, chip);
     else if (i2c_nack(e))
         add_fault(dp, title, "No answer\n" I2C_WIRES);
     else if (i2c_bus(e))
         add_fault(dp, title, "I2C bus errors\nSDA->P9.20 loose?\nSCL->P9.19 loose?\n"
                   "Shorted module?");
     else if (i2c_dev_bad(e))
-        add_fault(dp, title, "No /dev/i2c-2\nOverlay not loaded?\nCheck uEnv.txt");
+        add_fault(dp, title, SW_FAULT);     /* diagnosed in software, details in the app */
     else if (e)
-        add_fault(dp, title, "I2C error %d\n" I2C_WIRES, e);
+        add_fault(dp, title, "Err: %s\n" I2C_WIRES, i2c_words(e));
 }
 
 /* everything wrong right now: one page each, title = which part */
@@ -361,7 +382,7 @@ static void build_faults(display_t *dp)
             add_fault(dp, "PMS5003 FAULT", "No bytes\nTX->P9.26\nFan X? VCC->P9.7 5V\n"
                       "GND->P9.1");
         else if (__atomic_load_n(&h->pms_sensor_err, __ATOMIC_RELAXED))
-            add_fault(dp, "PMS5003 FAULT", "Sensor error\nfan/laser\nVCC->P9.7 off 10s");
+            add_fault(dp, "PMS5003 FAULT", "Sensor error\nfan/laser\nUnplug VCC (P9.7)\nfor 10s");
         else
             add_fault(dp, "PMS5003 FAULT", "Bad data\nTX->P9.26 loose?\nGND->P9.1");
     }
@@ -372,19 +393,18 @@ static void build_faults(display_t *dp)
     } else {
         if (m & AQM_ST_AHT_FAULT) {
             if (ae)
-                i2c_fault(dp, "AHT21 FAULT", ae, !(m & AQM_ST_ENS_FAULT), "ENS160");
+                i2c_fault(dp, "AHT21 FAULT", "AHT21", ae, !(m & AQM_ST_ENS_FAULT), "ENS160");
             else
-                add_fault(dp, "AHT21 FAULT", "Bad readings\nVIN->P9.3 3.3V\nGND->P9.1");
+                add_fault(dp, "AHT21 FAULT", "Bad readings\nVIN->P9.3 (3.3V)\nGND->P9.1");
         }
         if (m & AQM_ST_ENS_FAULT) {
             if (ee)
-                i2c_fault(dp, "ENS160 FAULT", ee, !(m & AQM_ST_AHT_FAULT), "AHT21");
+                i2c_fault(dp, "ENS160 FAULT", "ENS160", ee, !(m & AQM_ST_AHT_FAULT), "AHT21");
             else if (h && __atomic_load_n(&h->ens_invalid, __ATOMIC_RELAXED))
-                add_fault(dp, "ENS160 FAULT", "Invalid output\nWait, or\nVIN off 10s");
+                add_fault(dp, "ENS160 FAULT", "Invalid output\nWait 1 min, or\n"
+                          "unplug VIN (P9.3)\nfor 10s");
             else
-                add_fault(dp, "ENS160 FAULT", "Stalled: auto-reset\nResets: %u\n"
-                          "Repeats? add 10uF\nacross VIN-GND",
-                          h ? __atomic_load_n(&h->ens_stalls, __ATOMIC_RELAXED) : 0u);
+                add_fault(dp, "ENS160 FAULT", "Stalled\nAuto-reset\nSee phone app");
         }
     }
 
@@ -394,13 +414,12 @@ static void build_faults(display_t *dp)
     /* overlay devices: a missing driver can be seen, a broken wire can not */
     if (now - dp->start_ns > 10LL * 1000000000LL) {
         if (dp->led_fd < 0)
-            add_fault(dp, "LED FAULT", "No driver\nOverlay not loaded?\nP8.14->1k\n->LED->GND");
+            add_fault(dp, "LED FAULT", "No driver\nOverlay not loaded?\nP8.14->1k" "\x7f" "\n->LED->GND");
         if (dp->btn_fd < 0)
             add_fault(dp, "BUTTON FAULT", "No driver\nOverlay not loaded?\nP8.12->btn\n->GND");
     }
 
-    if (dp->crash[0] && (int64_t)time(NULL) - dp->crash_t < CRASH_SHOW_S)
-        add_fault(dp, "SYSTEM CRASH", "%s\nRestarted\njournalctl -u aqm", dp->crash);
+    /* a crash is restarted automatically (systemd); it is reported in the app only */
 
     /* the list changed: stay on a fault page only if it still exists */
     sig[0] = '\0';
@@ -459,14 +478,25 @@ static void load_crash(display_t *dp)
     if (t2 > t1 + 5 && !strcmp(result, "watchdog")) {
         hhmm_str(t2, ts, sizeof(ts));
         snprintf(dp->crash, sizeof(dp->crash), "%s\nFroze (watchdog)", ts);
+        snprintf(dp->crash_long, sizeof(dp->crash_long), "At %s the pipeline stopped "
+                 "responding; the watchdog restarted it automatically. Details: "
+                 "journalctl -u aqm -b", ts);
         dp->crash_t = t2;
     } else if (t1 && rc != 0 && rc != 143) {     /* 143 = SIGTERM: normal stop */
         hhmm_str(t1, ts, sizeof(ts));
-        if (rc > 128)
+        if (rc > 128) {
             snprintf(dp->crash, sizeof(dp->crash), "%s\n%s: %s", ts, stage,
                      sig_short(rc - 128));
-        else
+            snprintf(dp->crash_long, sizeof(dp->crash_long), "At %s the '%s' stage "
+                     "crashed (%s); the pipeline was restarted automatically. Details: "
+                     "journalctl -u aqm -b", ts, stage,
+                     rc == 139 ? "segmentation fault" : strsignal(rc - 128));
+        } else {
             snprintf(dp->crash, sizeof(dp->crash), "%s\n%s: exit %d", ts, stage, rc);
+            snprintf(dp->crash_long, sizeof(dp->crash_long), "At %s the '%s' stage stopped "
+                     "with exit code %d; the pipeline was restarted automatically. "
+                     "Details: journalctl -u aqm -b", ts, stage, rc);
+        }
         dp->crash_t = t1;
     }
     if (dp->crash[0]) {
@@ -477,6 +507,181 @@ static void load_crash(display_t *dp)
             if (*c == '\n')
                 *c = ' ';
         aqm_log("report", "last restart: %s", one);
+    }
+}
+
+/* ------------------------- software faults -> app ------------------------- */
+
+/* is `key=value` set (not commented out) in uEnv.txt text? */
+static int uenv_has(const char *txt, const char *key, const char *val)
+{
+    const char *l = txt;
+
+    while (l && *l) {
+        const char *e = strchr(l, '\n');
+        size_t n = e ? (size_t)(e - l) : strlen(l);
+        char line[256];
+
+        snprintf(line, sizeof(line), "%.*s", (int)n, l);
+        {
+            char *p = line;
+
+            while (*p == ' ' || *p == '\t')
+                p++;
+            if (*p != '#' && !strncmp(p, key, strlen(key)) && strstr(p, val))
+                return 1;
+        }
+        l = e ? e + 1 : NULL;
+    }
+    return 0;
+}
+
+/* Why are /dev/i2c-2 or the overlay devices missing? Checks what can be
+ * checked in software and says exactly what to change. */
+static void diagnose_overlay(char *out, size_t n)
+{
+    char txt[8192], uname_r[96] = "", path[160];
+    size_t len;
+    FILE *f;
+    const char *u;
+
+    if (!(f = fopen("/boot/uEnv.txt", "r"))) {
+        snprintf(out, n, "Cannot read /boot/uEnv.txt (%s).", strerror(errno));
+        return;
+    }
+    len = fread(txt, 1, sizeof(txt) - 1, f);
+    txt[len] = '\0';
+    fclose(f);
+    if ((u = strstr(txt, "uname_r=")))
+        sscanf(u + 8, "%95s", uname_r);
+
+    if (!uenv_has(txt, "enable_uboot_overlays", "=1")) {
+        snprintf(out, n, "/boot/uEnv.txt: the line 'enable_uboot_overlays=1' is missing "
+                 "or commented out (#). Fix: sudo nano /boot/uEnv.txt, add it, save, reboot.");
+        return;
+    }
+    if (!uenv_has(txt, "uboot_overlay_addr", "BB-AQM-00A0.dtbo")) {
+        snprintf(out, n, "/boot/uEnv.txt: the line 'uboot_overlay_addr4=BB-AQM-00A0.dtbo' "
+                 "is missing or commented out (#). Fix: sudo nano /boot/uEnv.txt, add it, "
+                 "save, reboot.");
+        return;
+    }
+    snprintf(path, sizeof(path), "/boot/dtbs/%s/overlays/BB-AQM-00A0.dtbo", uname_r);
+    if (uname_r[0] && access(path, R_OK) != 0) {
+        snprintf(out, n, "%s is missing. Fix: dtc -@ -I dts -O dtb -o /tmp/BB-AQM-00A0.dtbo "
+                 "dts/BB-AQM-00A0.dts, sudo cp it there, reboot.", path);
+        return;
+    }
+    if (access("/proc/device-tree/chosen/overlays/BB-AQM-00A0.kernel", F_OK) != 0) {
+        snprintf(out, n, "uEnv.txt and the overlay file are correct, but U-Boot did not load "
+                 "the overlay at boot. Reboot with the serial console (tio) open and look "
+                 "for an overlay error from U-Boot.");
+        return;
+    }
+    if (access("/dev/i2c-2", F_OK) != 0) {
+        snprintf(out, n, "The overlay is loaded but /dev/i2c-2 is missing: the i2c-dev "
+                 "driver is not loaded. Fix: sudo modprobe i2c-dev (and check "
+                 "/etc/modules-load.d).");
+        return;
+    }
+    if (access("/dev/i2c-2", R_OK | W_OK) != 0) {
+        snprintf(out, n, "/dev/i2c-2 exists but the monitor may not open it (permission). "
+                 "Fix: sudo systemctl restart aqm (aqm_devperm.sh sets the permissions).");
+        return;
+    }
+    snprintf(out, n, "uEnv.txt, the overlay and /dev/i2c-2 all look correct now; the "
+             "error should clear within a few seconds.");
+}
+
+/* JSON string body (quotes, backslashes, control characters escaped) */
+static void json_str(char *out, size_t n, const char *in)
+{
+    size_t o = 0;
+
+    for (; *in && o + 7 < n; in++) {
+        unsigned char c = (unsigned char)*in;
+
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20 || c == 0x7f) {
+            o += (size_t)snprintf(out + o, n - o, "\\u%04x", c == 0x7f ? 0x3a9 : c);
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+static void alert_add(char *js, size_t n, int *count, const char *title, const char *text)
+{
+    char t[96], x[512];
+    size_t len = strlen(js);
+
+    json_str(t, sizeof(t), title);
+    json_str(x, sizeof(x), text);
+    snprintf(js + len, n - len, "%s{\"title\":\"%s\",\"text\":\"%s\"}",
+             *count ? "," : "", t, x);
+    (*count)++;
+}
+
+/* Software faults (things to fix in software, or that fix themselves) are
+ * published, retained, on <topic>/alerts for the phone app:
+ *   {"ts":..., "items":[{"title":"...","text":"..."}, ...]}   (items empty = none)
+ * The OLED only says "See phone app" for them. */
+static void alerts_tick(display_t *dp)
+{
+    const aqm_health_t *h = dp->health;
+    int64_t now = mono_ns(), wall = (int64_t)time(NULL);
+    int ae = h ? __atomic_load_n(&h->aht_err, __ATOMIC_RELAXED) : 0;
+    int ee = h ? __atomic_load_n(&h->ens_err, __ATOMIC_RELAXED) : 0;
+    uint32_t st = h ? __atomic_load_n(&h->ens_stalls, __ATOMIC_RELAXED) : 0;
+    int overlay = ((dp->fault_mask & AQM_ST_AHT_FAULT) && i2c_dev_bad(ae)) ||
+                  ((dp->fault_mask & AQM_ST_ENS_FAULT) && i2c_dev_bad(ee)) ||
+                  (now - dp->start_ns > 10LL * 1000000000LL &&
+                   (dp->led_fd < 0 || dp->btn_fd < 0));
+    char js[sizeof(dp->alerts)], txt[400], ts[16];
+    int count = 0;
+
+    js[0] = '\0';
+    if (overlay) {
+        if (!dp->diag[0] || now - dp->diag_ns > 30LL * 1000000000LL) {
+            diagnose_overlay(dp->diag, sizeof(dp->diag));
+            dp->diag_ns = now;
+            aqm_log("report", "overlay / I2C diagnosis: %s", dp->diag);
+        }
+        alert_add(js, sizeof(js), &count, "Overlay / I2C bus not available", dp->diag);
+    } else {
+        dp->diag[0] = '\0';
+    }
+
+    if (st != dp->stalls_seen) {
+        dp->stalls_seen = st;
+        dp->stall_t = wall;
+    }
+    if (st) {
+        hhmm_str(dp->stall_t, ts, sizeof(ts));
+        snprintf(txt, sizeof(txt), "The ENS160 stopped delivering data %u time%s since the "
+                 "monitor started (last at %s) and was reset automatically each time. "
+                 "If this keeps happening: solder a 10 uF capacitor across the module's "
+                 "VIN and GND.", st, st == 1 ? "" : "s", ts);
+        alert_add(js, sizeof(js), &count, "ENS160 stalled", txt);
+    }
+
+    if (dp->crash_long[0] && wall - dp->crash_t < CRASH_SHOW_S)
+        alert_add(js, sizeof(js), &count, "Pipeline restarted", dp->crash_long);
+
+    snprintf(dp->alerts, sizeof(dp->alerts), "{\"ts\":%lld,\"items\":[%s]}",
+             (long long)wall, js);
+    /* publish on change (ignoring the timestamp) and every 60 s */
+    if (aqm_mqtt_connected(g_mqtt) &&
+        (strcmp(js, dp->alerts_sent) != 0 || now - dp->alerts_ns > 60LL * 1000000000LL)) {
+        if (aqm_mqtt_publish(g_mqtt, "alerts", dp->alerts, 1, 1) == 0) {
+            if (strcmp(js, dp->alerts_sent) != 0)
+                aqm_log("report", "app alerts: %d", count);
+            snprintf(dp->alerts_sent, sizeof(dp->alerts_sent), "%s", js);
+            dp->alerts_ns = now;
+        }
     }
 }
 
@@ -492,9 +697,7 @@ static void fault_tick(display_t *dp)
 
     if (dp->acc_fault)
         cur |= F_ACC;
-    if (dp->crash[0] && (int64_t)time(NULL) - dp->crash_t < CRASH_TICKER_S)
-        cur |= F_CRASH;
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 4; i++) {
         if (cur & g_faults[i].bit) {
             if (!dp->fault_since_ns[i])
                 dp->fault_since_ns[i] = now;
@@ -506,7 +709,7 @@ static void fault_tick(display_t *dp)
     }
     if (mask != dp->fault_mask) {
         dp->ticker[0] = '\0';
-        for (i = 0; i < 5; i++) {
+        for (i = 0; i < 4; i++) {
             uint32_t b = g_faults[i].bit;
 
             if ((mask & b) && !(dp->fault_mask & b))
@@ -673,6 +876,7 @@ static void display_tick(display_t *dp)
     button_tick(dp);
     fault_tick(dp);
     build_faults(dp);
+    alerts_tick(dp);
     led_tick(dp);
 
     if (!dp->have_lcd) {
