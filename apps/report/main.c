@@ -43,6 +43,8 @@
 #define PAGE_MS         30000         /* info page falls back to main after this */
 #define MULTI_GAP_MS    450           /* presses closer than this belong together */
 #define OFF_PRESSES     3             /* this many quick presses = screen off     */
+#define FAULT_SHOW_MS   5000          /* sensor faulty this long -> fault ticker  */
+#define TICKER_PX       3             /* ticker speed: px per 100 ms = 30 px/s    */
 
 /* rolling 1/5/10/20 min + 24 h averages of the samples this stage receives */
 static aqm_avg_t g_avg;
@@ -78,7 +80,21 @@ typedef struct {
     int          contrast_sent;       /* brightness the panel has, -1 = unknown    */
     int          oled_pub;            /* OLED state changed: publish it            */
     int64_t      oled_pub_ns;         /* last time the state was published         */
+    int64_t      fault_since_ns[3];   /* when each sensor's fault began, 0 = OK    */
+    uint32_t     fault_mask;          /* AQM_ST_* faults shown on the ticker       */
+    char         ticker[160];         /* the scrolling fault message               */
+    int          ticker_x;            /* its current x position                    */
 } display_t;
+
+/* one line per sensor pair; shown while the sensor is not working */
+static const struct {
+    uint32_t    bit;
+    const char *msg;
+} g_faults[3] = {
+    { AQM_ST_PMS_FAULT, "PM2.5/PM10 SENSOR (PMS5003) NOT WORKING" },
+    { AQM_ST_ENS_FAULT, "TVOC/eCO2 SENSOR (ENS160) NOT WORKING" },
+    { AQM_ST_AHT_FAULT, "TEMP/HUMIDITY SENSOR (AHT21) NOT WORKING" },
+};
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
  * udev applies its permissions, so a failure is retried from display_tick. */
@@ -232,14 +248,65 @@ static void get_sysinfo(aqm_sysinfo_t *si)
     freeifaddrs(ifa);
 }
 
-/* LED: fast blink = PM sensor fault, slow blink = AQI Poor or worse, else off */
+/* Sensor faults: a sensor that has been faulty for FAULT_SHOW_MS gets a
+ * message on a ticker that scrolls across the top of the main page (right to
+ * left, repeating) until the sensor works again. Short glitches don't show. */
+static void fault_tick(display_t *dp)
+{
+    int64_t now = mono_ns();
+    uint32_t mask = 0;
+    int i, w = dp->have_lcd ? ssd1306_width(&dp->lcd) : 128;
+
+    for (i = 0; i < 3; i++) {
+        if (dp->have_sample && (dp->last.status & g_faults[i].bit)) {
+            if (!dp->fault_since_ns[i])
+                dp->fault_since_ns[i] = now;
+            if (now - dp->fault_since_ns[i] >= (int64_t)FAULT_SHOW_MS * 1000000LL)
+                mask |= g_faults[i].bit;
+        } else {
+            dp->fault_since_ns[i] = 0;
+        }
+    }
+    if (mask != dp->fault_mask) {
+        dp->ticker[0] = '\0';
+        for (i = 0; i < 3; i++) {
+            uint32_t b = g_faults[i].bit;
+
+            if ((mask & b) && !(dp->fault_mask & b))
+                aqm_log("report", "on screen: %s", g_faults[i].msg);
+            else if (!(mask & b) && (dp->fault_mask & b))
+                aqm_log("report", "cleared: %s (working again)", g_faults[i].msg);
+            if (mask & b) {
+                size_t n = strlen(dp->ticker);
+
+                snprintf(dp->ticker + n, sizeof(dp->ticker) - n, "%s%s",
+                         n ? "   ***   " : "", g_faults[i].msg);
+            }
+        }
+        dp->fault_mask = mask;
+        dp->ticker_x = w;                       /* enter from the right edge */
+        dp->banner.ticker = mask ? dp->ticker : NULL;
+        dp->banner.ticker_x = dp->ticker_x;
+        dp->dirty = 1;
+    }
+    if (mask && dp->page == AQM_PAGE_MAIN && !dp->screen_off) {
+        dp->ticker_x -= TICKER_PX;
+        if (dp->ticker_x < -aqm_screen_ticker_width(dp->ticker))
+            dp->ticker_x = w;                   /* passed: start again */
+        dp->banner.ticker_x = dp->ticker_x;
+        dp->dirty = 1;
+    }
+}
+
+/* LED: fast blink = a sensor is not working (any of PMS5003, ENS160, AHT21),
+ * slow blink = AQI Poor or worse, else off */
 static void led_tick(display_t *dp)
 {
     int want = 0;
 
     if (dp->led_fd < 0 || !dp->have_sample)
         return;
-    if (dp->last.status & AQM_ST_PMS_FAULT)
+    if (dp->fault_mask)
         want = dp->tick & 1;                        /* 5 Hz  */
     else if (dp->last.aqi_cat >= AQI_POOR)
         want = (dp->tick / 5) & 1;                  /* 1 Hz  */
@@ -345,6 +412,7 @@ static void display_tick(display_t *dp)
     if ((dp->btn_fd < 0 || dp->led_fd < 0) && mono_ns() >= dp->io_retry_ns)
         io_open(dp);
     button_tick(dp);
+    fault_tick(dp);
     led_tick(dp);
 
     if (!dp->have_lcd) {

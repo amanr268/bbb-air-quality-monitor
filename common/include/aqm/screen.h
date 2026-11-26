@@ -12,7 +12,15 @@ enum { AQM_BANNER_NONE = 0, AQM_BANNER_AQI, AQM_BANNER_FAULT, AQM_BANNER_TVOC };
 typedef struct {
     int kind;       /* AQM_BANNER_*                    */
     int aqi_cat;    /* category for AQM_BANNER_AQI     */
+    /* sensor-fault ticker: scrolls across the top line of the header for as
+     * long as a sensor is not working (NULL / "" = none). ticker_x is the x
+     * of its first character; the caller decreases it to scroll. */
+    const char *ticker;
+    int ticker_x;
 } aqm_banner_t;
+
+/* width in pixels of the ticker text (the caller wraps ticker_x with it) */
+int aqm_screen_ticker_width(const char *ticker);
 
 /* Draw the air-quality screen for one (converted + compared) sample.
  * The layout adapts to the display rotation (landscape / portrait).

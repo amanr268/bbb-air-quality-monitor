@@ -53,6 +53,11 @@ static void banner_text(const aqm_banner_t *b, int portrait, char *buf, size_t n
     }
 }
 
+int aqm_screen_ticker_width(const char *ticker)
+{
+    return ssd1306_text_width(ticker, &font_6_10);
+}
+
 /* text centred in [x0, x0 + w); on = 0 draws dark text on a lit area */
 static void centre_in(ssd1306_t *d, int x0, int w, int y, const char *s,
                       const aqm_font_t *f, int on)
@@ -78,6 +83,7 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
     const aqm_font_t *sm = &font_6_10, *big = &font_10_20;
     int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
     char t[12], aqi[8], cat[24], pm25[8], pm10[8], tv[8], co2[8], tc[8], rh[8];
+    const char *tick = (banner && banner->ticker && banner->ticker[0]) ? banner->ticker : NULL;
     /* a missing sensor must never look like clean air (or -50 C) */
     int pm_ok = !(s->status & AQM_ST_PMS_FAULT);
     int ens_ok = !(s->status & AQM_ST_ENS_FAULT);
@@ -112,15 +118,29 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
         snprintf(rh, sizeof(rh), "--");
     }
 
+    if (!portrait && tick) {
+        /* landscape with a sensor fault: the top line of the header becomes
+         * the scrolling fault message; AQI, category and clock share line 2 */
+        char line[40];
+
+        ssd1306_rect(d, 0, 0, w, 21, 1);
+        ssd1306_text_color(d, banner->ticker_x, 1, tick, sm, 0);
+        snprintf(line, sizeof(line), "AQI %s %s", aqi, cat);
+        ssd1306_text_color(d, 2, 11, line, sm, 0);
+        if (2 + ssd1306_text_width(line, sm) + sm->w + ssd1306_text_width(t, sm) < w)
+            ssd1306_text_color(d, w - 1 - ssd1306_text_width(t, sm), 11, t, sm, 0);   /* clock if it fits */
+    }
     if (!portrait) {
         /* landscape 128 x 64: header 21 px, two rows of 3 tiles */
         int x = 2 + ssd1306_text_width(aqi, big) + 5;
 
-        ssd1306_rect(d, 0, 0, w, 21, 1);
-        ssd1306_text_color(d, 2, 1, aqi, big, 0);
-        ssd1306_text_color(d, x, 1, "AQI", sm, 0);
-        ssd1306_text_color(d, w - 1 - ssd1306_text_width(t, sm), 1, t, sm, 0);
-        ssd1306_text_color(d, x, 11, cat, sm, 0);
+        if (!tick) {
+            ssd1306_rect(d, 0, 0, w, 21, 1);
+            ssd1306_text_color(d, 2, 1, aqi, big, 0);
+            ssd1306_text_color(d, x, 1, "AQI", sm, 0);
+            ssd1306_text_color(d, w - 1 - ssd1306_text_width(t, sm), 1, t, sm, 0);
+            ssd1306_text_color(d, x, 11, cat, sm, 0);
+        }
         ssd1306_line(d, 42, 22, 42, 63);
         ssd1306_line(d, 85, 22, 85, 63);
         ssd1306_line(d, 0, 43, w - 1, 43);
@@ -133,7 +153,10 @@ void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *ba
     } else {
         /* portrait 64 x 128: header 46 px, three rows of 2 tiles, clock */
         ssd1306_rect(d, 0, 0, w, 46, 1);
-        centre_in(d, 0, w, 1, "AQI", sm, 0);
+        if (tick)       /* sensor fault: scrolling message instead of the "AQI" label */
+            ssd1306_text_color(d, banner->ticker_x, 1, tick, sm, 0);
+        else
+            centre_in(d, 0, w, 1, "AQI", sm, 0);
         centre_in(d, 0, w, 12, aqi, big, 0);
         centre_in(d, 0, w, 34, cat, sm, 0);
         ssd1306_line(d, 31, 47, 31, 115);

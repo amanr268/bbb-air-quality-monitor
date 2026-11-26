@@ -1,10 +1,11 @@
 [Unit]
-Description=Run the AQM self-test every day (and 10 min after boot)
+Description=AQM self-test: 2 min after power-on, 15 min after (data settled), then every 24 h
 
 [Timer]
-OnBootSec=10min
-OnCalendar=*-*-* 09:13:00
-Persistent=true
+# counted from when the BeagleBone (and the sensors) powered on - no fixed clock time
+OnBootSec=2min
+OnBootSec=15min
+OnUnitActiveSec=24h
 
 [Install]
 WantedBy=timers.target

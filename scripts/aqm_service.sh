@@ -9,7 +9,7 @@ BIN=${BIN:-./build/apps}
 rm -f /dev/shm/aqm_shm /dev/mqueue/aqm_alarm     # leftovers from a crash
 
 pids=()
-"$BIN/aqm_sense" -p 80 & pids+=($!)
+"$BIN/aqm_sense" -p 80 -R & pids+=($!)
 for _ in $(seq 50); do [ -e /dev/shm/aqm_shm ] && break; sleep 0.1; done
 "$BIN/aqm_capture" -p 70 & pids+=($!)
 "$BIN/aqm_convert" -p 60 & pids+=($!)

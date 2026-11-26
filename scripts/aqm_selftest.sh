@@ -1,7 +1,7 @@
 #!/bin/bash
 # AQM board self-test: prints PASS / WARN / FAIL for each subsystem.
 # Run on the board:  bash scripts/aqm_selftest.sh   (asks for sudo once)
-# Also runs daily from aqm-selftest.timer: journalctl -u aqm-selftest -n 70
+# Also runs 2 min and 15 min after power-on, then every 24 h (aqm-selftest.timer): journalctl -u aqm-selftest -n 70
 P=0; W=0; F=0
 if [ -t 1 ]; then G='\e[32m' Y='\e[33m' R='\e[31m' B='\e[1m' N='\e[0m'; else G= Y= R= B= N=; fi
 RES=()                                   # WARN/FAIL lines, published for the phone app
@@ -35,7 +35,7 @@ hdr "Watchdogs / clock"
 rw=$(systemctl show -p RuntimeWatchdogUSec --value)
 [ "$rw" != 0 ] && [ -n "$rw" ] && pass "hardware watchdog serviced by systemd ($rw)" || fail "hardware watchdog not configured"
 a=$(cat /sys/class/rtc/rtc0/since_epoch); sleep 2; b=$(cat /sys/class/rtc/rtc0/since_epoch)
-[ $((b-a)) -ge 1 ] && pass "RTC ticking (needed for one-tap power-off)" || fail "RTC frozen: rtc-int32k did not run"
+[ $((b-a)) -ge 1 ] && pass "RTC ticking (needed for power-off)" || fail "RTC frozen: rtc-int32k did not run"
 [ "$(timedatectl show -p NTPSynchronized --value)" = yes ] && pass "clock NTP-synchronised: $(date '+%d %b %H:%M')" || warn "clock not NTP-synchronised yet"
 
 hdr "Device tree / hardware"
@@ -55,7 +55,19 @@ hdr "Sensors (latest log lines)"
 j=$(journalctl -u aqm --since "-60 s" --no-pager -q -o cat)
 pms=$(grep 'PMS5003:' <<<"$j" | tail -1); aht=$(grep 'AHT21:' <<<"$j" | tail -1); ens=$(grep 'ENS160:' <<<"$j" | tail -1)
 [ -n "$pms" ] && { grep -q ' 0 bad checksum' <<<"$pms" && pass "PMS5003 ${pms##*PMS5003: }" || warn "PMS5003 ${pms##*PMS5003: }"; } || fail "no PMS5003 log in the last 60 s"
-[ -n "$aht" ] && { grep -q '0 bad CRC, 0 bus errors' <<<"$aht" && pass "AHT21 ${aht##*AHT21: }" || warn "AHT21 ${aht##*AHT21: }"; } || fail "no AHT21 log in the last 60 s"
+# Bus errors while the sensors power up (first 5 min after aqm starts) are normal.
+# Compare with the counter logged 5 min after start: only NEW errors warn.
+if [ -n "$aht" ]; then
+    n=$(grep -oE '[0-9]+ bus errors' <<<"$aht" | grep -oE '^[0-9]+')
+    st=$(systemctl show aqm -p ActiveEnterTimestamp --value); t0=$(date -d "$st" +%s 2>/dev/null || echo 0)
+    if (( $(date +%s) - t0 < 300 )); then b=early
+    else b=$(journalctl -u aqm --since "@$((t0+300))" --until "@$((t0+900))" --no-pager -q -o cat | grep 'AHT21:' | head -1 | grep -oE '[0-9]+ bus errors' | grep -oE '^[0-9]+'); fi
+    if ! grep -q ' 0 bad CRC' <<<"$aht"; then warn "AHT21 ${aht##*AHT21: }"
+    elif [ "$n" = 0 ]; then pass "AHT21 ${aht##*AHT21: }"
+    elif [ "$b" = early ]; then pass "AHT21 (start-up: bus errors ignored for the first 5 min) ${aht##*AHT21: }"
+    elif [ -n "$b" ] && (( n <= b )); then pass "AHT21 ($n bus errors during start-up only, none since) ${aht##*AHT21: }"
+    else warn "AHT21 ${aht##*AHT21: }"; fi
+else fail "no AHT21 log in the last 60 s"; fi
 if [ -n "$ens" ]; then
     if grep -qi "invalid" <<<"$ens"; then warn "ENS160 reports INVALID output: ${ens##*ENS160: }"
     elif grep -qiE "warm|initial" <<<"$ens"; then pass "ENS160 warming up (normal after power-on): ${ens##*ENS160: }"

@@ -87,6 +87,10 @@ static void setup_rt(int prio)
 
 static pms5003_t pms;
 static int       have_pms;
+/* -R (the real board): a sensor that is missing is a FAULT from the start,
+ * never replaced by simulated values. Without -R (development on a PC or a
+ * board without sensors) missing sensors are simulated. */
+static int       strict, pms_required;
 static int64_t   pms_last_ns;
 
 static void pms_init(const char *dev)
@@ -98,8 +102,9 @@ static void pms_init(const char *dev)
         return;
     }
     if ((rc = pms5003_open(&pms, dev)) != 0) {
-        aqm_log("sense", "PMS5003 on %s not available (%s): simulated PM values",
-                dev, strerror(-rc));
+        pms_required = strict;
+        aqm_log("sense", "PMS5003 on %s not available (%s): %s", dev, strerror(-rc),
+                strict ? "FAULT" : "simulated PM values");
         return;
     }
     have_pms = 1;
@@ -112,8 +117,13 @@ static void pms_apply(aqm_sample_t *s, int64_t now)
 {
     int rc;
 
-    if (!have_pms)
+    if (!have_pms) {
+        if (pms_required) {
+            s->pm1 = s->pm25 = s->pm10 = 0;
+            s->status |= AQM_ST_PMS_FAULT;
+        }
         return;
+    }
     s->status &= ~AQM_ST_PMS_FAULT;      /* ignore the simulator's injected fault */
 
     rc = pms5003_poll(&pms);
@@ -353,15 +363,17 @@ int main(int argc, char **argv)
     struct timespec next;
     aqm_shm_t *shm;
 
-    while ((opt = getopt(argc, argv, "p:t:P:I:")) != -1) {
+    while ((opt = getopt(argc, argv, "p:t:P:I:R")) != -1) {
         switch (opt) {
+        case 'R': strict = 1; break;
         case 'p': prio = atoi(optarg); break;
         case 't': period_ms = atoi(optarg); break;
         case 'P': pms_dev = optarg; break;
         case 'I': i2c_dev = optarg; break;
         default:
             fprintf(stderr, "usage: %s [-p rt_prio (0 = off)] [-t period_ms] "
-                    "[-P /dev/ttyS1 | none] [-I /dev/i2c-2 | none]\n", argv[0]);
+                    "[-P /dev/ttyS1 | none] [-I /dev/i2c-2 | none] [-R]\n"
+                    "  -R  real board: a missing sensor is a FAULT, never simulated\n", argv[0]);
             return 2;
         }
     }
@@ -374,6 +386,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (strict && strcmp(i2c_dev, "none"))
+        seen_aht = seen_ens = 1;             /* missing from the start = FAULT */
     pms_init(pms_dev);
     if (!strcmp(i2c_dev, "none"))
         aqm_log("sense", "ENS160 / AHT21 disabled: simulated TVOC / eCO2 / T / RH");
