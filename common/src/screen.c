@@ -228,25 +228,22 @@ static int avg_row(ssd1306_t *d, int y, const aqm_avg_t *avg, int win, const aqm
 }
 
 void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
-                          const aqm_sysinfo_t *si, const aqm_avg_t *avg, int have_faults)
+                          const aqm_sysinfo_t *si, const aqm_avg_t *avg, int nfaults)
 {
     static const char *title[AQM_PAGE_COUNT] = { "Air", "Faults", "Particles", "Averages",
                                                  "Climate", "System" };
     const aqm_font_t *f = &font_6_10;
     int w = ssd1306_width(d), portrait = w < ssd1306_height(d);
     int pm_ok = !(s->status & AQM_ST_PMS_FAULT), y;
-    char a[24], b[24], n[8];
+    char a[24], b[24], n[24];
 
     if (page <= AQM_PAGE_FAULTS || page >= AQM_PAGE_COUNT)
         return;
     ssd1306_clear(d);
 
-    /* header: title + page number, then a rule. Without faults the fault
-     * page does not exist: 5 pages, numbered without it */
-    if (have_faults)
-        snprintf(n, sizeof(n), "%d/%d", page + 1, AQM_PAGE_COUNT);
-    else
-        snprintf(n, sizeof(n), "%d/%d", page, AQM_PAGE_COUNT - 1);
+    /* header: title + page number, then a rule. The fault pages (one per
+     * fault) come between the main page and this one */
+    snprintf(n, sizeof(n), "%d/%d", page + nfaults, AQM_PAGE_COUNT - 1 + nfaults);
     if (portrait) {
         centre(d, 0, title[page], f);
         centre(d, f->h, n, f);
@@ -356,48 +353,34 @@ static int wrap(const char *text, int cols, char lines[][24], int max)
     return n;
 }
 
-int aqm_screen_draw_fault(ssd1306_t *d, int k, int n, const char *title,
-                          const char *body, int part)
+void aqm_screen_draw_fault(ssd1306_t *d, int no, int total, const char *title,
+                           const char *body)
 {
     const aqm_font_t *f = &font_6_10;
     int w = ssd1306_width(d), h = ssd1306_height(d), portrait = w < h;
-    int cols = w / f->w, y, i, nt, nb, per, parts;
-    char tl[4][24], bl[32][24], hdr[24], pg[8];
+    int cols = w / f->w, y, i, nb, nt;
+    char tl[3][24], bl[16][24], pg[16];
 
     ssd1306_clear(d);
-    snprintf(pg, sizeof(pg), "2/%d", AQM_PAGE_COUNT);
-    snprintf(hdr, sizeof(hdr), n > 1 ? "FAULT %d/%d" : "FAULT", k + 1, n);
+    snprintf(pg, sizeof(pg), "%d/%d", no, total);
+
+    /* header: inverted bar with the title (which part) and the page number */
     if (portrait) {
-        centre(d, 0, hdr, f);
-        centre(d, f->h, pg, f);
-        y = 2 * f->h + 1;
+        nt = wrap(title, cols, tl, 2);
+        ssd1306_rect(d, 0, 0, w, (nt + 1) * f->h + 1, 1);
+        for (i = 0; i < nt; i++)
+            centre_in(d, 0, w, 1 + i * f->h, tl[i], f, 0);
+        centre_in(d, 0, w, 1 + nt * f->h, pg, f, 0);
+        y = (nt + 1) * f->h + 3;
     } else {
-        ssd1306_text(d, 0, 0, hdr, f);
-        ssd1306_text(d, w - ssd1306_text_width(pg, f), 0, pg, f);
-        y = f->h - 1;                       /* landscape: no rule, room for 4 lines */
-    }
-    if (portrait) {
-        ssd1306_line(d, 0, y, w - 1, y);
-        y += 2;
+        ssd1306_rect(d, 0, 0, w, f->h + 1, 1);
+        ssd1306_text_color(d, 1, 1, title, f, 0);
+        ssd1306_text_color(d, w - 1 - ssd1306_text_width(pg, f), 1, pg, f, 0);
+        y = f->h + 3;
     }
 
-    /* title: inverted bar */
-    nt = wrap(title, cols, tl, portrait ? 3 : 1);
-    ssd1306_rect(d, 0, y, w, nt * f->h + 1, 1);
-    for (i = 0; i < nt; i++)
-        centre_in(d, 0, w, y + 1 + i * f->h, tl[i], f, 0);
-    y += nt * f->h + 2;
-
-    /* body: as many lines as fit; longer texts are split into parts */
-    nb = wrap(body, cols, bl, 32);
-    per = (h - y) / f->h;
-    if (per < 1)
-        per = 1;
-    parts = (nb + per - 1) / per;
-    if (parts < 1)
-        parts = 1;
-    part %= parts;
-    for (i = part * per; i < nb && i < (part + 1) * per; i++, y += f->h)
+    /* body: one fact per line */
+    nb = wrap(body, cols, bl, 16);
+    for (i = 0; i < nb && y + f->h <= h + 1; i++, y += f->h)
         ssd1306_text(d, 0, y, bl[i], f);
-    return parts;
 }
