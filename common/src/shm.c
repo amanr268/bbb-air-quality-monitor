@@ -38,7 +38,7 @@ aqm_shm_t *aqm_shm_create(void)
             return NULL;
         }
     }
-    p->version = 1;
+    p->version = 2;
     p->running = 1;
     __atomic_store_n(&p->magic, AQM_SHM_MAGIC, __ATOMIC_RELEASE);
     return p;

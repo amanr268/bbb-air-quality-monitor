@@ -27,6 +27,7 @@ typedef struct {
     uint32_t bad_checksum;
     uint32_t bad_length;
     uint32_t resync_bytes;       /* bytes skipped while looking for 42 4D */
+    uint32_t bytes;              /* all bytes read from the UART          */
     /* latest good frame */
     pms5003_frame_t last;
     int      have_frame;

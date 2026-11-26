@@ -143,8 +143,10 @@ int pms5003_poll(pms5003_t *p)
 
     if (p->fd < 0)
         return -EBADF;
-    while ((n = read(p->fd, chunk, sizeof(chunk))) > 0)
+    while ((n = read(p->fd, chunk, sizeof(chunk))) > 0) {
+        p->bytes += (uint32_t)n;
         frames += pms5003_feed(p, chunk, (size_t)n);
+    }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         return -errno;
     return frames;

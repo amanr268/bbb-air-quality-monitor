@@ -26,6 +26,8 @@ ExecStart=/home/aman/bbb-air-quality-monitor/scripts/aqm_service.sh
 ExecStopPost=/bin/rm -f /dev/shm/aqm_shm /dev/mqueue/aqm_alarm
 # blank the OLED whatever way the service ended (clean stop, crash, kill)
 ExecStopPost=-/home/aman/bbb-air-quality-monitor/build/tools/oled_off
+# why the service stopped (success / exit-code / watchdog ...): the OLED fault page shows a freeze
+ExecStopPost=-/bin/sh -c 'echo "$$(date +%%s) $$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" > /home/aman/bbb-air-quality-monitor/data/last_stop'
 # no sample through all 5 stages for 5 s -> kill and restart
 WatchdogSec=5
 TimeoutStartSec=30

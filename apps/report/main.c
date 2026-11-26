@@ -20,6 +20,7 @@
 #include "aqm/timeutil.h"
 
 #include <arpa/inet.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <ifaddrs.h>
 #include <linux/input.h>
@@ -43,8 +44,14 @@
 #define PAGE_MS         30000         /* info page falls back to main after this */
 #define MULTI_GAP_MS    450           /* presses closer than this belong together */
 #define OFF_PRESSES     3             /* this many quick presses = screen off     */
-#define FAULT_SHOW_MS   5000          /* sensor faulty this long -> fault ticker  */
+#define FAULT_SHOW_MS   2000          /* sensor faulty this long -> fault ticker  */
 #define TICKER_PX       3             /* ticker speed: px per 100 ms = 30 px/s    */
+#define FAULT_PART_MS   4000          /* fault page: next part / next fault after this */
+#define PMS_SILENT_MS   3000          /* no byte from the PMS5003 this long = no signal */
+#define ACC_FAIL_MAX    20            /* ADXL345 reads failing in a row = fault    */
+#define CRASH_FILE      "data/last_exit"   /* written by aqm_service.sh */
+#define CRASH_SHOW_S    (24 * 3600)   /* a crash stays on the fault page this long */
+#define MAX_FAULTS      8
 
 /* rolling 1/5/10/20 min + 24 h averages of the samples this stage receives */
 static aqm_avg_t g_avg;
@@ -80,20 +87,42 @@ typedef struct {
     int          contrast_sent;       /* brightness the panel has, -1 = unknown    */
     int          oled_pub;            /* OLED state changed: publish it            */
     int64_t      oled_pub_ns;         /* last time the state was published         */
-    int64_t      fault_since_ns[3];   /* when each sensor's fault began, 0 = OK    */
+    int64_t      fault_since_ns[5];   /* when each fault began, 0 = OK             */
     uint32_t     fault_mask;          /* AQM_ST_* faults shown on the ticker       */
-    char         ticker[160];         /* the scrolling fault message               */
+    char         ticker[320];         /* the scrolling fault message               */
     int          ticker_x;            /* its current x position                    */
+    const aqm_health_t *health;       /* sensor details from sense (shm)           */
+    uint32_t     pms_bytes, pms_frames;    /* last seen counters ...               */
+    int64_t      pms_bytes_ns, pms_frames_ns; /* ... and when they last changed    */
+    int          acc_fail, acc_fault; /* ADXL345 reads failing in a row / fault     */
+    char         crash[96];           /* last pipeline crash, "" = none            */
+    int64_t      crash_t;             /* its wall-clock time                       */
+    int          nfaults;             /* entries on the fault page                 */
+    char         ftitle[MAX_FAULTS][28];
+    char         fbody[MAX_FAULTS][200];
+    int          fault_k, fault_part, fault_parts;
+    int64_t      fault_flip_ns;
+    int64_t      start_ns;            /* when report started                       */
+    aqm_orient_cal_t cal;             /* orientation calibration (for re-opening)  */
+    int          cal_ok;
+    int64_t      acc_retry_ns;
+    char         fsig[MAX_FAULTS * 28];   /* titles joined: detects a change    */
 } display_t;
 
-/* one line per sensor pair; shown while the sensor is not working */
+/* ticker lines; the first three are the sample's AQM_ST_* bits, the others
+ * are found by report itself */
+#define F_ACC    (1u << 8)            /* ADXL345 not answering                  */
+#define F_CRASH  (1u << 9)            /* pipeline restarted after a crash (10 min) */
+#define CRASH_TICKER_S  600
 static const struct {
     uint32_t    bit;
     const char *msg;
-} g_faults[3] = {
+} g_faults[5] = {
     { AQM_ST_PMS_FAULT, "PM2.5/PM10 SENSOR (PMS5003) NOT WORKING" },
     { AQM_ST_ENS_FAULT, "TVOC/eCO2 SENSOR (ENS160) NOT WORKING" },
     { AQM_ST_AHT_FAULT, "TEMP/HUMIDITY SENSOR (AHT21) NOT WORKING" },
+    { F_ACC,            "ACCELEROMETER (ADXL345) NOT WORKING" },
+    { F_CRASH,          "SYSTEM RESTARTED AFTER A CRASH" },
 };
 
 /* open OLED (+ ADXL345). At boot /dev/i2c-2 can briefly be root-only until
@@ -120,8 +149,11 @@ static void display_open(display_t *dp)
     if ((rc = aqm_orient_cal_load(&cal, cal_path)) != 0) {
         aqm_log("report", "no orientation calibration (%s): fixed landscape. "
                 "Run build/tools/accel_cal to enable auto-rotate", cal_path);
-    } else if ((rc = adxl345_open(&dp->acc, I2C_DEV, ADXL_ADDR)) != 0) {
+    } else if ((dp->cal = cal, dp->cal_ok = 1,
+                rc = adxl345_open(&dp->acc, I2C_DEV, ADXL_ADDR)) != 0) {
         aqm_log("report", "ADXL345 not available (%s): fixed landscape", strerror(-rc));
+        dp->acc_fault = 1;                 /* calibrated, so it should be there */
+        dp->acc_retry_ns = mono_ns() + 5000000000LL;
     } else {
         aqm_orient_init(&dp->orient, &cal, ORIENT_HOLD);
         dp->have_acc = 1;
@@ -197,8 +229,7 @@ static int alarm_banner(const aqm_alarm_t *a, aqm_banner_t *b)
         b->aqi_cat = (int)aqm_aqi_category(a->value);
         break;
     case AQM_ALM_FAULT:
-        b->kind = AQM_BANNER_FAULT;
-        break;
+        return 0;       /* the fault ticker names the sensor; page 2 says what to check */
     case AQM_ALM_TVOC:
         b->kind = AQM_BANNER_TVOC;
         break;
@@ -248,6 +279,211 @@ static void get_sysinfo(aqm_sysinfo_t *si)
     freeifaddrs(ifa);
 }
 
+/* ------------------------------ fault page ------------------------------ */
+
+/* "4:05 PM" */
+static void hhmm_str(long long t, char *buf, size_t n)
+{
+    time_t tt = (time_t)t;
+    struct tm tm;
+
+    localtime_r(&tt, &tm);
+    strftime(buf, n, "%I:%M %p", &tm);
+    if (buf[0] == '0')
+        memmove(buf, buf + 1, strlen(buf));
+}
+
+static void add_fault(display_t *dp, const char *title, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void add_fault(display_t *dp, const char *title, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (dp->nfaults >= MAX_FAULTS)
+        return;
+    snprintf(dp->ftitle[dp->nfaults], sizeof(dp->ftitle[0]), "%s", title);
+    va_start(ap, fmt);
+    vsnprintf(dp->fbody[dp->nfaults], sizeof(dp->fbody[0]), fmt, ap);
+    va_end(ap);
+    dp->nfaults++;
+}
+
+static int i2c_nack(int e)  { return e == EREMOTEIO || e == ENXIO; }
+static int i2c_bus(int e)   { return e == ETIMEDOUT || e == EAGAIN || e == EIO; }
+static int i2c_dev_bad(int e) { return e == ENOENT || e == ENODEV || e == EACCES || e == EPERM; }
+
+/* one wire per line: lines are at most 21 characters (landscape) */
+#define I2C_WIRES "SDA -> P9.20\nSCL -> P9.19\nVIN -> P9.3 (3.3V)\nGND -> P9.1"
+
+/* one I2C chip on the ENS160+AHT21 module; partner_ok = the other chip works */
+static void i2c_fault(display_t *dp, const char *title, const char *chip, int e,
+                      int partner_ok, const char *partner)
+{
+    if (i2c_nack(e) && partner_ok)
+        add_fault(dp, title, "%s not answering,\nbut the %s on the\nsame module works:\n"
+                  "wires are OK. Unplug\nVIN (P9.3) for 10 s.\nIf it stays: the\n"
+                  "%s is faulty.", chip, partner, chip);
+    else if (i2c_nack(e))
+        add_fault(dp, title, "%s not answering.\nCheck module wires:\n" I2C_WIRES, chip);
+    else if (i2c_bus(e))
+        add_fault(dp, title, "I2C bus errors:\n%s.\nLoose/touching wire\nor shorted module.\n"
+                  "Re-seat:\nSDA -> P9.20\nSCL -> P9.19", strerror(e));
+    else if (i2c_dev_bad(e))
+        add_fault(dp, title, "/dev/i2c-2 unusable\n(%s).\nOverlay BB-AQM not\n"
+                  "loaded? Check\n/boot/uEnv.txt", strerror(e));
+    else if (e)
+        add_fault(dp, title, "%s error:\n%s.\nCheck module wires:\n" I2C_WIRES,
+                  chip, strerror(e));
+}
+
+/* everything wrong right now, with what to check; titles fit one line */
+static void build_faults(display_t *dp)
+{
+    const aqm_health_t *h = dp->health;
+    int64_t now = mono_ns();
+    uint32_t m = dp->fault_mask;
+    int ae = 0, ee = 0;
+    char sig[sizeof(dp->fsig)];
+    int i;
+
+    dp->nfaults = 0;
+    if (h) {
+        uint32_t b = __atomic_load_n(&h->pms_bytes, __ATOMIC_RELAXED);
+        uint32_t f = __atomic_load_n(&h->pms_frames, __ATOMIC_RELAXED);
+
+        if (b != dp->pms_bytes) { dp->pms_bytes = b; dp->pms_bytes_ns = now; }
+        if (f != dp->pms_frames) { dp->pms_frames = f; dp->pms_frames_ns = now; }
+        ae = __atomic_load_n(&h->aht_err, __ATOMIC_RELAXED);
+        ee = __atomic_load_n(&h->ens_err, __ATOMIC_RELAXED);
+    }
+
+    /* PMS5003: are bytes arriving at all? valid frames? the sensor's own flag? */
+    if (m & AQM_ST_PMS_FAULT) {
+        const char *t = "PM SENSOR (PMS5003)";
+
+        if (!h || now - dp->pms_bytes_ns > (int64_t)PMS_SILENT_MS * 1000000LL)
+            add_fault(dp, t, "No signal from it.\nCheck sensor TX wire:\n-> P9.26 (UART1 RX)\n"
+                      "Fan not spinning?\nVCC -> P9.7 (5V)\nGND -> P9.1\n"
+                      "(P9.24 -> sensor RX\nis not needed for\ndata)");
+        else if (__atomic_load_n(&h->pms_sensor_err, __ATOMIC_RELAXED))
+            add_fault(dp, t, "Sensor reports an\ninternal error (fan\nor laser). Unplug\n"
+                      "VCC (P9.7) for 10 s.");
+        else
+            add_fault(dp, t, "Data is garbled.\nRe-seat these wires:\nsensor TX -> P9.26\n"
+                      "GND -> P9.1");
+    }
+
+    /* ENS160 + AHT21 share one module and the I2C bus */
+    if ((m & AQM_ST_AHT_FAULT) && (m & AQM_ST_ENS_FAULT) && i2c_nack(ae) && i2c_nack(ee)) {
+        add_fault(dp, "TEMP/RH + TVOC MODULE", "Module not answering\n(screen works, so\n"
+                  "the board side is OK)\nCheck module wires:\n" I2C_WIRES);
+    } else {
+        if (m & AQM_ST_AHT_FAULT) {
+            if (ae)
+                i2c_fault(dp, "TEMP/RH (AHT21)", "AHT21", ae,
+                          !(m & AQM_ST_ENS_FAULT), "ENS160");
+            else
+                add_fault(dp, "TEMP/RH (AHT21)", "No valid readings\n(busy/CRC errors).\n"
+                          "Check:\nVIN -> P9.3 (3.3V)\nGND -> P9.1");
+        }
+        if (m & AQM_ST_ENS_FAULT) {
+            if (ee)
+                i2c_fault(dp, "TVOC/eCO2 (ENS160)", "ENS160", ee,
+                          !(m & AQM_ST_AHT_FAULT), "AHT21");
+            else if (h && __atomic_load_n(&h->ens_invalid, __ATOMIC_RELAXED))
+                add_fault(dp, "TVOC/eCO2 (ENS160)", "ENS160 says its\noutput is invalid.\n"
+                          "Usually recovers.\nIf not: unplug VIN\n(P9.3) for 10 s.");
+            else
+                add_fault(dp, "TVOC/eCO2 (ENS160)", "Stopped delivering\ndata: being reset\n"
+                          "automatically\n(resets: %u). If it\nkeeps happening: add\n"
+                          "10uF across VIN/GND",
+                          h ? __atomic_load_n(&h->ens_stalls, __ATOMIC_RELAXED) : 0u);
+        }
+    }
+
+    if (m & F_ACC)
+        add_fault(dp, "ACCELEROMETER ADXL345", "Not answering:\nauto-rotate is off.\n"
+                  "Check its wires:\n" I2C_WIRES);
+
+    /* overlay devices: a missing driver can be seen, a broken wire can not */
+    if (now - dp->start_ns > 10LL * 1000000000LL) {
+        if (dp->led_fd < 0)
+            add_fault(dp, "ALARM LED", "LED driver missing:\noverlay BB-AQM not\n"
+                      "loaded. Wiring:\nP8.14 -> 1k -> LED\n-> GND");
+        if (dp->btn_fd < 0)
+            add_fault(dp, "BUTTON", "Button driver\nmissing: overlay\nBB-AQM not loaded.\n"
+                      "Wiring:\nP8.12 -> button\n-> GND");
+    }
+
+    if (dp->crash[0] && (int64_t)time(NULL) - dp->crash_t < CRASH_SHOW_S)
+        add_fault(dp, "SYSTEM RESTART", "%s\nShown for 24 h.\nLog: journalctl\n-u aqm -b",
+                  dp->crash);
+
+    /* the list changed: start again at the first fault */
+    sig[0] = '\0';
+    for (i = 0; i < dp->nfaults; i++)
+        strncat(sig, dp->ftitle[i], sizeof(sig) - strlen(sig) - 1);
+    if (strcmp(sig, dp->fsig) != 0) {
+        snprintf(dp->fsig, sizeof(dp->fsig), "%s", sig);
+        dp->fault_k = dp->fault_part = 0;
+        dp->fault_flip_ns = now + (int64_t)FAULT_PART_MS * 1000000LL;
+        if (dp->page == AQM_PAGE_FAULTS)
+            dp->dirty = 1;
+    }
+    if (dp->page == AQM_PAGE_FAULTS) {
+        if (!dp->nfaults) {                       /* all fixed: page disappears */
+            dp->page = AQM_PAGE_MAIN;
+            dp->dirty = 1;
+        } else if (now >= dp->fault_flip_ns) {    /* next part, then next fault */
+            if (++dp->fault_part >= dp->fault_parts) {
+                dp->fault_part = 0;
+                dp->fault_k = (dp->fault_k + 1) % dp->nfaults;
+            }
+            dp->fault_flip_ns = now + (int64_t)FAULT_PART_MS * 1000000LL;
+            dp->dirty = 1;
+        }
+    }
+}
+
+/* the last pipeline restart, recorded by aqm_service.sh (which stage exited,
+ * how) and by systemd's ExecStopPost (watchdog = frozen). "" = none */
+static void load_crash(display_t *dp)
+{
+    FILE *f;
+    long long t1 = 0, t2 = 0;
+    char stage[32] = "", result[32] = "", ts[16];
+    int rc = 0;
+
+    dp->crash[0] = '\0';
+    if ((f = fopen(CRASH_FILE, "r"))) {
+        if (fscanf(f, "%lld %31s %d", &t1, stage, &rc) != 3)
+            t1 = 0;
+        fclose(f);
+    }
+    if ((f = fopen("data/last_stop", "r"))) {
+        if (fscanf(f, "%lld %31s", &t2, result) != 2)
+            t2 = 0;
+        fclose(f);
+    }
+    if (t2 > t1 + 5 && !strcmp(result, "watchdog")) {
+        hhmm_str(t2, ts, sizeof(ts));
+        snprintf(dp->crash, sizeof(dp->crash),
+                 "Restarted at %s: the pipeline froze (watchdog).", ts);
+        dp->crash_t = t2;
+    } else if (t1 && rc != 0 && rc != 143) {     /* 143 = SIGTERM: normal stop */
+        hhmm_str(t1, ts, sizeof(ts));
+        if (rc > 128)
+            snprintf(dp->crash, sizeof(dp->crash), "Restarted at %s: stage %s crashed (%s).",
+                     ts, stage, rc == 139 ? "segmentation fault" : strsignal(rc - 128));
+        else
+            snprintf(dp->crash, sizeof(dp->crash), "Restarted at %s: stage %s exited "
+                     "with code %d.", ts, stage, rc);
+        dp->crash_t = t1;
+    }
+    if (dp->crash[0])
+        aqm_log("report", "last restart: %s", dp->crash);
+}
+
 /* Sensor faults: a sensor that has been faulty for FAULT_SHOW_MS gets a
  * message on a ticker that scrolls across the top of the main page (right to
  * left, repeating) until the sensor works again. Short glitches don't show. */
@@ -256,9 +492,14 @@ static void fault_tick(display_t *dp)
     int64_t now = mono_ns();
     uint32_t mask = 0;
     int i, w = dp->have_lcd ? ssd1306_width(&dp->lcd) : 128;
+    uint32_t cur = dp->have_sample ? dp->last.status : 0;
 
-    for (i = 0; i < 3; i++) {
-        if (dp->have_sample && (dp->last.status & g_faults[i].bit)) {
+    if (dp->acc_fault)
+        cur |= F_ACC;
+    if (dp->crash[0] && (int64_t)time(NULL) - dp->crash_t < CRASH_TICKER_S)
+        cur |= F_CRASH;
+    for (i = 0; i < 5; i++) {
+        if (cur & g_faults[i].bit) {
             if (!dp->fault_since_ns[i])
                 dp->fault_since_ns[i] = now;
             if (now - dp->fault_since_ns[i] >= (int64_t)FAULT_SHOW_MS * 1000000LL)
@@ -269,7 +510,7 @@ static void fault_tick(display_t *dp)
     }
     if (mask != dp->fault_mask) {
         dp->ticker[0] = '\0';
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < 5; i++) {
             uint32_t b = g_faults[i].bit;
 
             if ((mask & b) && !(dp->fault_mask & b))
@@ -282,6 +523,11 @@ static void fault_tick(display_t *dp)
                 snprintf(dp->ticker + n, sizeof(dp->ticker) - n, "%s%s",
                          n ? "   ***   " : "", g_faults[i].msg);
             }
+        }
+        if (mask) {
+            size_t n = strlen(dp->ticker);
+
+            snprintf(dp->ticker + n, sizeof(dp->ticker) - n, "   >>> PRESS BUTTON: PAGE 2");
         }
         dp->fault_mask = mask;
         dp->ticker_x = w;                       /* enter from the right edge */
@@ -298,15 +544,18 @@ static void fault_tick(display_t *dp)
     }
 }
 
-/* LED: fast blink = a sensor is not working (any of PMS5003, ENS160, AHT21),
- * slow blink = AQI Poor or worse, else off */
+/* LED: double blink every 2 s = the OLED itself is not working (nothing else
+ * can tell you), fast blink = something on the fault page (a sensor not
+ * working), slow blink = AQI Poor or worse, else off */
 static void led_tick(display_t *dp)
 {
     int want = 0;
 
     if (dp->led_fd < 0 || !dp->have_sample)
         return;
-    if (dp->fault_mask)
+    if (!dp->have_lcd && mono_ns() - dp->start_ns > 10LL * 1000000000LL)
+        want = (dp->tick % 20) == 0 || (dp->tick % 20) == 2;   /* double blink: no screen */
+    else if (dp->fault_mask)
         want = dp->tick & 1;                        /* 5 Hz  */
     else if (dp->last.aqi_cat >= AQI_POOR)
         want = (dp->tick / 5) & 1;                  /* 1 Hz  */
@@ -391,7 +640,17 @@ static void button_tick(display_t *dp)
         if (dp->screen_off) {
             screen_power(dp, 1, "button");
         } else if (dp->have_lcd) {
-            dp->page = (dp->page + dp->presses) % AQM_PAGE_COUNT;
+            int i;
+
+            for (i = 0; i < dp->presses; i++) {       /* page 2 only while faults exist */
+                dp->page = (dp->page + 1) % AQM_PAGE_COUNT;
+                if (dp->page == AQM_PAGE_FAULTS && !dp->nfaults)
+                    dp->page++;
+            }
+            if (dp->page == AQM_PAGE_FAULTS) {        /* start at the first fault */
+                dp->fault_k = dp->fault_part = 0;
+                dp->fault_flip_ns = mono_ns() + (int64_t)FAULT_PART_MS * 1000000LL;
+            }
             dp->page_until_ns = mono_ns() + (int64_t)PAGE_MS * 1000000LL;
             dp->dirty = 1;
         }
@@ -413,6 +672,7 @@ static void display_tick(display_t *dp)
         io_open(dp);
     button_tick(dp);
     fault_tick(dp);
+    build_faults(dp);
     led_tick(dp);
 
     if (!dp->have_lcd) {
@@ -427,11 +687,31 @@ static void display_tick(display_t *dp)
         }
     }
 
-    if (dp->have_acc && adxl345_read_g(&dp->acc, &gx, &gy, &gz) == 0 &&
-        aqm_orient_update(&dp->orient, gx, gy, gz)) {
-        ssd1306_set_rotation(&dp->lcd, aqm_orient_rotation(&dp->orient));
-        aqm_log("report", "display -> %s", aqm_orient_name(dp->orient.state));
-        dp->dirty = 1;
+    /* ADXL345 unplugged: reads fail -> fault (auto-rotate pauses); retry */
+    if (dp->have_acc) {
+        if (adxl345_read_g(&dp->acc, &gx, &gy, &gz) != 0) {
+            if (++dp->acc_fail == ACC_FAIL_MAX) {
+                aqm_log("report", "ADXL345 not answering: auto-rotate paused");
+                dp->acc_fault = 1;
+            }
+        } else {
+            if (dp->acc_fault)
+                aqm_log("report", "ADXL345 answering again");
+            dp->acc_fail = dp->acc_fault = 0;
+            if (aqm_orient_update(&dp->orient, gx, gy, gz)) {
+                ssd1306_set_rotation(&dp->lcd, aqm_orient_rotation(&dp->orient));
+                aqm_log("report", "display -> %s", aqm_orient_name(dp->orient.state));
+                dp->dirty = 1;
+            }
+        }
+    } else if (dp->acc_fault && dp->cal_ok && mono_ns() >= dp->acc_retry_ns) {
+        if (adxl345_open(&dp->acc, I2C_DEV, ADXL_ADDR) == 0) {
+            aqm_orient_init(&dp->orient, &dp->cal, ORIENT_HOLD);
+            dp->have_acc = 1;
+            dp->acc_fault = dp->acc_fail = 0;
+            aqm_log("report", "ADXL345 found: auto-rotate enabled");
+        }
+        dp->acc_retry_ns = mono_ns() + 5000000000LL;
     }
 
     if (dp->banner.kind != AQM_BANNER_NONE && mono_ns() >= dp->banner_until_ns) {
@@ -442,10 +722,14 @@ static void display_tick(display_t *dp)
     if (dp->dirty && dp->have_sample && !dp->screen_off) {
         if (dp->page == AQM_PAGE_MAIN) {
             aqm_screen_draw(&dp->lcd, &dp->last, &dp->banner);
+        } else if (dp->page == AQM_PAGE_FAULTS) {
+            dp->fault_parts = aqm_screen_draw_fault(&dp->lcd, dp->fault_k, dp->nfaults,
+                                                    dp->ftitle[dp->fault_k],
+                                                    dp->fbody[dp->fault_k], dp->fault_part);
         } else {
             aqm_sysinfo_t si;
             get_sysinfo(&si);
-            aqm_screen_draw_page(&dp->lcd, &dp->last, dp->page, &si, &g_avg);
+            aqm_screen_draw_page(&dp->lcd, &dp->last, dp->page, &si, &g_avg, dp->nfaults > 0);
         }
         if ((rc = ssd1306_flush(&dp->lcd)) != 0)
             aqm_log("report", "OLED write failed: %s", strerror(-rc));
@@ -546,6 +830,9 @@ int main(int argc, char **argv)
     g_mqtt = aqm_mqtt_start(getenv("AQM_MQTT") ? getenv("AQM_MQTT") : "config/mqtt.conf");
     g_modbus = aqm_modbus_start(getenv("AQM_MODBUS") ? getenv("AQM_MODBUS") : "config/modbus.conf");
     display_init(&disp);
+    disp.health = &shm->health;
+    disp.start_ns = mono_ns();
+    load_crash(&disp);
 
     while (!aqm_should_stop() && aqm_running(shm)) {
         aqm_sample_t s;

@@ -91,6 +91,9 @@ static int       have_pms;
  * never replaced by simulated values. Without -R (development on a PC or a
  * board without sensors) missing sensors are simulated. */
 static int       strict, pms_required;
+static aqm_health_t *g_health;          /* in shm, read by report's fault page */
+
+#define HSET(field, v)  __atomic_store_n(&g_health->field, (v), __ATOMIC_RELAXED)
 static int64_t   pms_last_ns;
 
 static void pms_init(const char *dev)
@@ -132,6 +135,9 @@ static void pms_apply(aqm_sample_t *s, int64_t now)
     else if (rc < 0)
         aqm_log("sense", "PMS5003 read error: %s", strerror(-rc));
 
+    HSET(pms_bytes, pms.bytes);
+    HSET(pms_frames, pms.frames_ok);
+    HSET(pms_sensor_err, pms.have_frame && pms.last.error ? 1u : 0u);
     if (pms.have_frame && now - pms_last_ns < PMS_TIMEOUT_NS && !pms.last.error) {
         s->pm1  = pms.last.pm1;
         s->pm25 = pms.last.pm25;
@@ -182,6 +188,7 @@ static void i2c_try_open(int64_t now)
 
     if (!have_aht) {
         rc = aht21_open(&aht, i2c_dev);
+        HSET(aht_err, -rc);
         if (rc == 0) {
             have_aht = 1;
             aht_fail = 0;
@@ -198,6 +205,7 @@ static void i2c_try_open(int64_t now)
     }
     if (!have_ens) {
         rc = ens160_open(&ens, i2c_dev, 0);
+        HSET(ens_err, -rc);
         if (rc == 0) {
             have_ens = 1;
             ens_fail = 0;
@@ -239,6 +247,10 @@ static void aht_apply(aqm_sample_t *s, int64_t now)
     /* result of the measurement started 1 s ago, then start the next one:
      * the 80 ms conversion never blocks this real-time loop */
     rc = aht21_fetch(&aht, &t, &rh);
+    if (rc == 0)
+        HSET(aht_err, 0);
+    else if (rc != -EBUSY && rc != -EBADMSG)       /* busy / CRC are not wiring */
+        HSET(aht_err, -rc);
     if (rc == 0) {
         aht_t_last = t;
         aht_rh_last = rh;
@@ -295,6 +307,10 @@ static void ens_apply(aqm_sample_t *s, int64_t now)
     rc = ens160_read(&ens, &d);
     if (rc == 1 && d.aqi_uba == 0)
         rc = 0;                     /* UBA is 1..5: an all-zero frame is not data */
+    if (rc >= 0 || rc == -EIO)
+        HSET(ens_err, 0);
+    else
+        HSET(ens_err, -rc);
     if (rc == 1) {
         ens_last = d;
         ens_data_ns = now;
@@ -318,7 +334,9 @@ static void ens_apply(aqm_sample_t *s, int64_t now)
         ens_last.validity != ENS160_INVALID) {
         s->tvoc_ppb = ens_last.tvoc_ppb;
         s->eco2_ppm = ens_last.eco2_ppm;
+        HSET(ens_invalid, 0u);
     } else {
+        HSET(ens_invalid, ens_have_val && ens_last.validity == ENS160_INVALID ? 1u : 0u);
         s->tvoc_ppb = s->eco2_ppm = 0;
         s->status |= AQM_ST_ENS_FAULT;
     }
@@ -334,6 +352,7 @@ static void ens_apply(aqm_sample_t *s, int64_t now)
             aqm_log("sense", "ENS160 stalled (no new data for %lld s, status 0x%02x): "
                     "resetting it", (long long)((now - since) / 1000000000LL),
                     ens.last_status);
+            HSET(ens_stalls, g_health->ens_stalls + 1);
             ens160_close(&ens);
             have_ens = 0;
             ens_last_rc = 1;
@@ -386,6 +405,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    g_health = &shm->health;
     if (strict && strcmp(i2c_dev, "none"))
         seen_aht = seen_ens = 1;             /* missing from the start = FAULT */
     pms_init(pms_dev);

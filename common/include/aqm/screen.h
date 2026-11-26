@@ -29,8 +29,10 @@ int aqm_screen_ticker_width(const char *ticker);
 void aqm_screen_draw(ssd1306_t *d, const aqm_sample_t *s, const aqm_banner_t *banner);
 
 /* extra pages, cycled with the button; page MAIN is aqm_screen_draw() */
-enum { AQM_PAGE_MAIN = 0, AQM_PAGE_PARTICLES, AQM_PAGE_AVERAGES, AQM_PAGE_CLIMATE,
-       AQM_PAGE_SYSTEM, AQM_PAGE_COUNT };
+/* FAULTS exists only while something is wrong: then there are 6 pages,
+ * otherwise 5 and the button skips it */
+enum { AQM_PAGE_MAIN = 0, AQM_PAGE_FAULTS, AQM_PAGE_PARTICLES, AQM_PAGE_AVERAGES,
+       AQM_PAGE_CLIMATE, AQM_PAGE_SYSTEM, AQM_PAGE_COUNT };
 
 typedef struct {
     char ip[16];        /* "" = no network */
@@ -41,6 +43,13 @@ typedef struct {
  * si: SYSTEM page; avg: PARTICLES (24 h AQI) and AVERAGES pages (may be NULL).
  * Call ssd1306_flush() afterwards. */
 void aqm_screen_draw_page(ssd1306_t *d, const aqm_sample_t *s, int page,
-                          const aqm_sysinfo_t *si, const aqm_avg_t *avg);
+                          const aqm_sysinfo_t *si, const aqm_avg_t *avg, int have_faults);
+
+/* Fault page (page 2 while something is wrong): fault k of n, its title in an
+ * inverted bar and the explanation (what to check, which pin) word-wrapped
+ * below. A text too long for the screen is split into parts; `part` picks
+ * one (the caller cycles it). Returns the number of parts. */
+int aqm_screen_draw_fault(ssd1306_t *d, int k, int n, const char *title,
+                          const char *body, int part);
 
 #endif
